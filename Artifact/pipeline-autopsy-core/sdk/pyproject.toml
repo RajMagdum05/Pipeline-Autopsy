@@ -1,0 +1,13 @@
+[project]
+name = "pipeline-autopsy-sdk"
+version = "0.1.0"
+description = "Connector SDK for Pipeline Autopsy — decorator-based tracing for AI pipelines."
+requires-python = ">=3.10"
+dependencies = ["requests>=2.28", "pydantic>=2.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["pipeline_autopsy"]
