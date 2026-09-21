@@ -23,3 +23,86 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
+
+/* Pipeline Animated Connector Beam */
+@keyframes beamFlow {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+.pipeline-beam-active {
+  background: linear-gradient(90deg, #3b82f6, #06b6d4, #10b981, #3b82f6);
+  background-size: 200% 200%;
+  animation: beamFlow 1.8s linear infinite;
+}
+
+.pipeline-beam-glow {
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.6), 0 0 24px rgba(6, 182, 212, 0.3);
+}
+
+/* Radar ping for active stage */
+@keyframes radarRing {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.2;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+.animate-radar-ring {
+  animation: radarRing 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Shimmer animation */
+@keyframes shimmerGradient {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.2) 50%, rgba(255,255,255,0) 100%);
+  background-size: 200% 100%;
+  animation: shimmerGradient 2s infinite;
+}
+
+/* Glow border animation */
+@keyframes borderPulse {
+  0%, 100% {
+    border-color: rgba(59, 130, 246, 0.8);
+    box-shadow: 0 0 15px rgba(59, 130, 246, 0.25);
+  }
+  50% {
+    border-color: rgba(6, 182, 212, 0.9);
+    box-shadow: 0 0 25px rgba(6, 182, 212, 0.4);
+  }
+}
+
+.border-pulse-active {
+  animation: borderPulse 2s ease-in-out infinite;
+}
+
+/* Terminal blink cursor */
+@keyframes blinkCursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.animate-blink {
+  animation: blinkCursor 0.8s infinite;
+}
+

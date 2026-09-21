@@ -184,4 +184,50 @@ export function getDocumentFileUrl(claimId: string, documentId: number): string 
   return `${API_BASE_URL}/claims/${claimId}/documents/${documentId}/file`;
 }
 
+export async function processClaim(claimId: string) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/claims/${claimId}/process`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const errJson = await response.json().catch(() => null);
+      throw new Error(errJson?.detail || `Processing failed with status ${response.status}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    if (error instanceof Error) {
+      throw error;
+    }
+    console.error(`Error running pipeline for claim #${claimId}:`, error);
+    throw new Error('Unable to execute claim pipeline.');
+  }
+}
+
+export async function getClaimExecution(claimId: string) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/claims/${claimId}/execution`, {
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) return null;
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error(`Error fetching execution history for claim #${claimId}:`, error);
+    return null;
+  }
+}
+
+
 

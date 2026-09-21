@@ -71,3 +71,71 @@ export interface ClaimDocument {
   ocr_status?: string;
   ocr_result?: OCRResult | null;
 }
+
+export interface RuleResult {
+  rule_id: string;
+  rule_name: string;
+  input_values: Record<string, any>;
+  expected_condition: string;
+  actual_value: any;
+  result: 'PASS' | 'FAIL' | 'MISSING_DATA';
+  reason: string;
+}
+
+export interface RuleEngineDecision {
+  claim_id: number | string;
+  execution_id: string;
+  decision: 'APPROVED' | 'REJECTED' | 'FLAGGED_FOR_REVIEW' | string;
+  decision_reason: string;
+  total_rules: number;
+  passed_rules: number;
+  failed_rules: number;
+  missing_data_rules: number;
+  evaluated_rules: RuleResult[];
+  created_at?: string | null;
+}
+
+export interface ExtractedBillItem {
+  description: string;
+  amount: number;
+  category?: string;
+}
+
+export interface ExtractedClaimData {
+  patient_name?: string | null;
+  patient_id?: string | null;
+  policy_number?: string | null;
+  hospital_name?: string | null;
+  admission_date?: string | null;
+  discharge_date?: string | null;
+  diagnosis?: string | null;
+  diagnosis_code?: string | null;
+  total_bill_amount?: number | null;
+  claimed_amount?: number | null;
+  bill_items?: ExtractedBillItem[];
+  pre_existing_conditions?: string[] | null;
+  source_references?: Record<string, { document_id: number | string; page_number: number }>;
+  [key: string]: any;
+}
+
+export interface ValidatedExtractionResult {
+  claim_id: number | string;
+  execution_id: string;
+  source_document_ids?: number[];
+  extraction_prompt_version?: string;
+  extraction_model?: string;
+  extraction_status: 'SUCCESS' | 'VALIDATION_ERROR' | 'API_ERROR' | 'NONE';
+  extracted_data?: ExtractedClaimData | null;
+  validation_errors?: string[] | null;
+}
+
+export interface PipelineExecutionResponse {
+  claim_id: number;
+  customer_name: string;
+  status: string;
+  total_documents?: number;
+  total_pages?: number;
+  extraction?: ValidatedExtractionResult | null;
+  decision?: RuleEngineDecision | null;
+}
+

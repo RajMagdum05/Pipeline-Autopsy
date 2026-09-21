@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autopsy-sdk"
+version = "0.1.0"
+description = "Lightweight customer integration SDK for Pipeline Autopsy observability"
+readme = "README.md"
+authors = [{ name = "Pipeline Autopsy Team" }]
+requires-python = ">=3.9"
+dependencies = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]

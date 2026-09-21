@@ -27,6 +27,10 @@ from app.prompts import (
     build_gemini_extraction_prompt,
 )
 from app.services.ocr.quality_validator import OCRQualityValidator, OCRDocumentValidationResult
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+tracer = trace.get_tracer("enterprise_pipeline.extraction")
 
 logger = logging.getLogger("enterprise_pipeline.extraction")
 
@@ -207,93 +211,149 @@ def validate_and_finalize_extraction(
     validation_errors: List[str] = []
     data: Dict[str, Any] = {}
 
-    if not raw_response:
-        validation_errors.append("Extraction response is null or empty.")
-    elif isinstance(raw_response, str):
-        cleaned_str = raw_response.strip()
-        if cleaned_str.startswith("```json"):
-            cleaned_str = cleaned_str[7:]
-        if cleaned_str.startswith("```"):
-            cleaned_str = cleaned_str[3:]
-        if cleaned_str.endswith("```"):
-            cleaned_str = cleaned_str[:-3]
-        cleaned_str = cleaned_str.strip()
+    with tracer.start_as_current_span("extraction_validation") as span:
+        span.set_attribute("claim_id", claim_id)
+        span.set_attribute("execution_id", execution_id)
+        span.set_attribute("extraction_model", extraction_model)
 
-        try:
-            parsed = json.loads(cleaned_str)
-            if isinstance(parsed, dict):
-                data = parsed
-            else:
-                validation_errors.append(f"JSON root must be an object, got {type(parsed)}")
-        except Exception as json_err:
-            validation_errors.append(f"Response is not valid JSON: {str(json_err)}")
-    elif isinstance(raw_response, dict):
-        data = raw_response
-    else:
-        validation_errors.append(f"Invalid raw response type: {type(raw_response)}")
+        if not raw_response:
+            validation_errors.append("Extraction response is null or empty.")
+        elif isinstance(raw_response, str):
+            cleaned_str = raw_response.strip()
+            if cleaned_str.startswith("```json"):
+                cleaned_str = cleaned_str[7:]
+            if cleaned_str.startswith("```"):
+                cleaned_str = cleaned_str[3:]
+            if cleaned_str.endswith("```"):
+                cleaned_str = cleaned_str[:-3]
+            cleaned_str = cleaned_str.strip()
 
-    # Check additional_information dictionary layout
-    if "additional_information" in data and data["additional_information"] is not None:
-        if not isinstance(data["additional_information"], dict):
-            validation_errors.append(f"'additional_information' must be a dict, got {type(data['additional_information'])}")
-
-    # Check source_references list layout
-    parsed_source_refs: List[ClaimSourceReference] = []
-    if "source_references" in data and data["source_references"] is not None:
-        if not isinstance(data["source_references"], list):
-            validation_errors.append(f"'source_references' must be a list, got {type(data['source_references'])}")
+            try:
+                parsed = json.loads(cleaned_str)
+                if isinstance(parsed, dict):
+                    data = parsed
+                else:
+                    validation_errors.append(f"JSON root must be an object, got {type(parsed)}")
+            except Exception as json_err:
+                validation_errors.append(f"Response is not valid JSON: {str(json_err)}")
+        elif isinstance(raw_response, dict):
+            data = raw_response
         else:
-            for idx, ref in enumerate(data["source_references"]):
-                if not isinstance(ref, dict):
-                    validation_errors.append(f"Source reference index {idx} is not a dict.")
-                    continue
-                if "field_name" not in ref or not ref["field_name"]:
-                    validation_errors.append(f"Source reference index {idx} missing 'field_name'.")
-                if "document_id" not in ref or ref["document_id"] is None:
-                    validation_errors.append(f"Source reference index {idx} missing 'document_id'.")
-                if "page_number" not in ref or ref["page_number"] is None:
-                    validation_errors.append(f"Source reference index {idx} missing 'page_number'.")
-                try:
-                    parsed_source_refs.append(ClaimSourceReference(**ref))
-                except Exception as ref_err:
-                    validation_errors.append(f"Source reference index {idx} schema error: {ref_err}")
+            validation_errors.append(f"Invalid raw response type: {type(raw_response)}")
 
-    # Check numeric amount field
-    parsed_amount: Optional[Decimal] = None
-    if "amount" in data and data["amount"] is not None:
-        raw_amt = data["amount"]
-        try:
-            if isinstance(raw_amt, str):
-                cleaned_amt = raw_amt.replace("$", "").replace(",", "").strip()
-                parsed_amount = Decimal(cleaned_amt)
+        # Check additional_information dictionary layout
+        if "additional_information" in data and data["additional_information"] is not None:
+            if not isinstance(data["additional_information"], dict):
+                validation_errors.append(f"'additional_information' must be a dict, got {type(data['additional_information'])}")
+
+        # Check source_references list layout
+        parsed_source_refs: List[ClaimSourceReference] = []
+        if "source_references" in data and data["source_references"] is not None:
+            if not isinstance(data["source_references"], list):
+                validation_errors.append(f"'source_references' must be a list, got {type(data['source_references'])}")
             else:
-                parsed_amount = Decimal(str(raw_amt))
-        except Exception:
-            validation_errors.append(f"Field 'amount' must be numeric, got invalid value '{raw_amt}'")
+                for idx, ref in enumerate(data["source_references"]):
+                    if not isinstance(ref, dict):
+                        validation_errors.append(f"Source reference index {idx} is not a dict.")
+                        continue
+                    if "field_name" not in ref or not ref["field_name"]:
+                        validation_errors.append(f"Source reference index {idx} missing 'field_name'.")
+                    if "document_id" not in ref or ref["document_id"] is None:
+                        validation_errors.append(f"Source reference index {idx} missing 'document_id'.")
+                    if "page_number" not in ref or ref["page_number"] is None:
+                        validation_errors.append(f"Source reference index {idx} missing 'page_number'.")
+                    try:
+                        parsed_source_refs.append(ClaimSourceReference(**ref))
+                    except Exception as ref_err:
+                        validation_errors.append(f"Source reference index {idx} schema error: {ref_err}")
 
-    # Check date field format
-    date_val = data.get("date")
-    if date_val is not None and not isinstance(date_val, str):
-        validation_errors.append(f"Field 'date' must be a string, got {type(date_val)}")
+        # Check numeric amount field
+        parsed_amount: Optional[Decimal] = None
+        if "amount" in data and data["amount"] is not None:
+            raw_amt = data["amount"]
+            try:
+                if isinstance(raw_amt, str):
+                    cleaned_amt = raw_amt.replace("$", "").replace(",", "").strip()
+                    parsed_amount = Decimal(cleaned_amt)
+                else:
+                    parsed_amount = Decimal(str(raw_amt))
+            except Exception:
+                validation_errors.append(f"Field 'amount' must be numeric, got invalid value '{raw_amt}'")
 
-    # If any structural validation errors exist, handle failure
-    if validation_errors:
-        failed_result = ValidatedExtractionResult(
+        # Check date field format
+        date_val = data.get("date")
+        if date_val is not None and not isinstance(date_val, str):
+            validation_errors.append(f"Field 'date' must be a string, got {type(date_val)}")
+
+        span.set_attribute("validation.errors_count", len(validation_errors))
+
+        # If any structural validation errors exist, handle failure
+        if validation_errors:
+            span.set_attribute("validation.status", "FAILED")
+            span.set_attribute("validation.ready_for_rule_engine", False)
+
+            err_msg = f"Extraction structural validation failed with {len(validation_errors)} error(s): {'; '.join(validation_errors)}"
+            span.set_status(Status(StatusCode.ERROR, err_msg))
+
+            failed_result = ValidatedExtractionResult(
+                claim_id=claim_id,
+                execution_id=execution_id,
+                extraction_status="FAILED",
+                ready_for_rule_engine=False,
+                patient_name=data.get("patient_name") if isinstance(data.get("patient_name"), str) else None,
+                hospital=data.get("hospital") if isinstance(data.get("hospital"), str) else None,
+                diagnosis=data.get("diagnosis") if isinstance(data.get("diagnosis"), str) else None,
+                treatment=data.get("treatment") if isinstance(data.get("treatment"), str) else None,
+                date=date_val if isinstance(date_val, str) else None,
+                amount=parsed_amount,
+                additional_information=data.get("additional_information") if isinstance(data.get("additional_information"), dict) else {},
+                source_references=parsed_source_refs,
+                extraction_model=extraction_model,
+                extraction_prompt_version=extraction_prompt_version,
+                validation_errors=validation_errors,
+            )
+
+            if db_session is not None:
+                _save_extraction_record(
+                    db=db_session,
+                    claim_id=claim_id,
+                    execution_id=execution_id,
+                    payload=payload,
+                    extraction_model=extraction_model,
+                    extraction_status="FAILED",
+                    extracted_data=data,
+                    validation_errors=validation_errors,
+                )
+
+            val_exc = ExtractionValidationError(
+                message=err_msg,
+                errors=validation_errors,
+                failed_result=failed_result,
+            )
+            span.record_exception(val_exc)
+            raise val_exc
+
+        # Success: Construct ValidatedExtractionResult
+        span.set_attribute("validation.status", "VALIDATED")
+        span.set_attribute("validation.ready_for_rule_engine", True)
+        span.set_status(Status(StatusCode.OK))
+
+        validated_obj = ValidatedExtractionResult(
             claim_id=claim_id,
             execution_id=execution_id,
-            extraction_status="FAILED",
-            ready_for_rule_engine=False,
-            patient_name=data.get("patient_name") if isinstance(data.get("patient_name"), str) else None,
-            hospital=data.get("hospital") if isinstance(data.get("hospital"), str) else None,
-            diagnosis=data.get("diagnosis") if isinstance(data.get("diagnosis"), str) else None,
-            treatment=data.get("treatment") if isinstance(data.get("treatment"), str) else None,
-            date=date_val if isinstance(date_val, str) else None,
+            extraction_status="VALIDATED",
+            ready_for_rule_engine=True,
+            patient_name=data.get("patient_name"),
+            hospital=data.get("hospital"),
+            diagnosis=data.get("diagnosis"),
+            treatment=data.get("treatment"),
+            date=date_val,
             amount=parsed_amount,
-            additional_information=data.get("additional_information") if isinstance(data.get("additional_information"), dict) else {},
+            additional_information=data.get("additional_information") or {},
             source_references=parsed_source_refs,
             extraction_model=extraction_model,
             extraction_prompt_version=extraction_prompt_version,
-            validation_errors=validation_errors,
+            validation_errors=[],
         )
 
         if db_session is not None:
@@ -303,49 +363,12 @@ def validate_and_finalize_extraction(
                 execution_id=execution_id,
                 payload=payload,
                 extraction_model=extraction_model,
-                extraction_status="FAILED",
-                extracted_data=data,
-                validation_errors=validation_errors,
+                extraction_status="VALIDATED",
+                extracted_data=json.loads(validated_obj.model_dump_json()),
+                validation_errors=[],
             )
 
-        raise ExtractionValidationError(
-            message=f"Extraction structural validation failed with {len(validation_errors)} error(s): {'; '.join(validation_errors)}",
-            errors=validation_errors,
-            failed_result=failed_result,
-        )
-
-    # Success: Construct ValidatedExtractionResult
-    validated_obj = ValidatedExtractionResult(
-        claim_id=claim_id,
-        execution_id=execution_id,
-        extraction_status="VALIDATED",
-        ready_for_rule_engine=True,
-        patient_name=data.get("patient_name"),
-        hospital=data.get("hospital"),
-        diagnosis=data.get("diagnosis"),
-        treatment=data.get("treatment"),
-        date=date_val,
-        amount=parsed_amount,
-        additional_information=data.get("additional_information") or {},
-        source_references=parsed_source_refs,
-        extraction_model=extraction_model,
-        extraction_prompt_version=extraction_prompt_version,
-        validation_errors=[],
-    )
-
-    if db_session is not None:
-        _save_extraction_record(
-            db=db_session,
-            claim_id=claim_id,
-            execution_id=execution_id,
-            payload=payload,
-            extraction_model=extraction_model,
-            extraction_status="VALIDATED",
-            extracted_data=json.loads(validated_obj.model_dump_json()),
-            validation_errors=[],
-        )
-
-    return validated_obj
+        return validated_obj
 
 
 def validate_extraction_response(
@@ -389,7 +412,7 @@ def extract_claim_from_validated_ocr(
     1. Check GEMINI_API_KEY environment variable. Raise ExtractionConfigError if missing.
     2. Aggregate validated OCR pages across claim documents (`build_claim_extraction_input`).
     3. Format clean LLM prompt using `build_gemini_extraction_prompt`.
-    4. Execute Gemini API call with model fallbacks.
+    4. Execute Gemini API call with model fallbacks (wrapped in information_extraction span).
     5. Perform structural validation & status finalization (`validate_and_finalize_extraction`).
     6. Persist extraction record to DB if `db_session` provided.
     7. Return validated `ValidatedExtractionResult`.
@@ -426,47 +449,70 @@ def extract_claim_from_validated_ocr(
     full_prompt = build_gemini_extraction_prompt(claim_id=claim_id, formatted_document_text=formatted_text)
 
     # 4. Execute Gemini API Call with Model Fallback
-    client = genai.Client(api_key=api_key)
     raw_response_text: Optional[str] = None
     used_model: Optional[str] = None
     api_errors: List[str] = []
 
-    for model_name in PREFERRED_GEMINI_MODELS:
-        try:
-            logger.info(f"Executing Information Extraction for Claim #{claim_id} using model '{model_name}'...")
-            response = client.models.generate_content(
-                model=model_name,
-                contents=full_prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
-            )
-            if response and response.text:
-                raw_response_text = response.text
-                used_model = model_name
-                break
-            else:
-                api_errors.append(f"Model '{model_name}' returned empty response text.")
-        except Exception as err:
-            err_str = str(err)
-            clean_err = err_str.replace(api_key, "[REDACTED_API_KEY]")
-            logger.warning(f"Model '{model_name}' failed: {clean_err}")
-            api_errors.append(f"Model '{model_name}' error: {clean_err}")
+    with tracer.start_as_current_span("information_extraction") as span:
+        span.set_attribute("claim_id", claim_id)
+        span.set_attribute("execution_id", execution_id)
+        span.set_attribute("extraction.prompt_version", EXTRACTION_PROMPT_VERSION)
+        span.set_attribute("extraction.total_documents", payload.total_documents)
+        span.set_attribute("extraction.total_validated_pages", payload.total_validated_pages)
 
-    if not raw_response_text:
-        if allow_fallback:
-            logger.warning("All Gemini API model calls failed. Using fallback offline parser.")
-            fallback_res = _fallback_offline_extraction(payload)
-            return validate_and_finalize_extraction(
-                raw_response=fallback_res.model_dump(),
-                claim_id=claim_id,
-                execution_id=execution_id,
-                extraction_model="offline_fallback",
-                db_session=db_session,
-                payload=payload,
-            )
-        clean_errors = [e.replace(api_key, "[REDACTED_API_KEY]") for e in api_errors]
-        raise ExtractionAPIError(f"Gemini API execution failed across all models: {'; '.join(clean_errors)}")
+        try:
+            client = genai.Client(api_key=api_key)
+            for model_name in PREFERRED_GEMINI_MODELS:
+                try:
+                    logger.info(f"Executing Information Extraction for Claim #{claim_id} using model '{model_name}'...")
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=full_prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                        ),
+                    )
+                    if response and response.text:
+                        raw_response_text = response.text
+                        used_model = model_name
+                        break
+                    else:
+                        api_errors.append(f"Model '{model_name}' returned empty response text.")
+                except Exception as err:
+                    err_str = str(err)
+                    clean_err = err_str.replace(api_key, "[REDACTED_API_KEY]")
+                    logger.warning(f"Model '{model_name}' failed: {clean_err}")
+                    api_errors.append(f"Model '{model_name}' error: {clean_err}")
+
+            if not raw_response_text:
+                if allow_fallback:
+                    logger.warning("All Gemini API model calls failed. Using fallback offline parser.")
+                    fallback_res = _fallback_offline_extraction(payload)
+                    span.set_attribute("extraction.model", "offline_fallback")
+                    span.set_attribute("extraction.status", "FALLBACK")
+                    return validate_and_finalize_extraction(
+                        raw_response=fallback_res.model_dump(),
+                        claim_id=claim_id,
+                        execution_id=execution_id,
+                        extraction_model="offline_fallback",
+                        db_session=db_session,
+                        payload=payload,
+                    )
+                clean_errors = [e.replace(api_key, "[REDACTED_API_KEY]") for e in api_errors]
+                api_exc = ExtractionAPIError(f"Gemini API execution failed across all models: {'; '.join(clean_errors)}")
+                span.record_exception(api_exc)
+                span.set_status(Status(StatusCode.ERROR, str(api_exc)))
+                raise api_exc
+
+            span.set_attribute("extraction.model", used_model or "gemini")
+            span.set_attribute("extraction.status", "RAW_EXTRACTED")
+            span.set_status(Status(StatusCode.OK))
+
+        except Exception as exc:
+            if not isinstance(exc, ExtractionServiceError):
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+            raise
 
     # 5. Perform Validation and Finalization
     return validate_and_finalize_extraction(

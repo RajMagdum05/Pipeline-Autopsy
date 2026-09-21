@@ -32,14 +32,14 @@ export const CreateClaimPage: React.FC = () => {
     if (!customerName.trim() || !claimAmount) return;
 
     try {
-      await addClaim({
+      const newClaim = await addClaim({
         customerName: customerName.trim(),
         amount: parseFloat(claimAmount) || 0,
         files: selectedFiles,
       });
 
-      // After successful creation in PostgreSQL, navigate back to /claims dashboard
-      navigate('/claims');
+      // After successful creation in PostgreSQL, navigate directly to /claims/:id
+      navigate(`/claims/${newClaim.id}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to connect to the claims service.';
       setFormError(msg);

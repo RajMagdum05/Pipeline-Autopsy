@@ -1,5 +1,9 @@
 from typing import List, Union, Optional, Dict, Any
 from pydantic import BaseModel, Field
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+tracer = trace.get_tracer("enterprise_pipeline.ocr_validation")
 
 from app.schemas import OCRResult, OCRPage, OCRLine, OCRWord
 
@@ -168,48 +172,65 @@ class OCRQualityValidator:
         else:
             res_obj = ocr_result
 
-        page_validations: List[OCRPageValidationResult] = []
-        conf_scores: List[float] = []
-        pass_count = 0
-        warn_count = 0
-        fail_count = 0
+        with tracer.start_as_current_span("ocr_validation") as span:
+            if res_obj.document_id is not None:
+                span.set_attribute("document_id", res_obj.document_id)
 
-        for page in res_obj.pages:
-            page_res = self.validate_page(page)
-            page_validations.append(page_res)
+            page_validations: List[OCRPageValidationResult] = []
+            conf_scores: List[float] = []
+            pass_count = 0
+            warn_count = 0
+            fail_count = 0
 
-            if page_res.status == "PASS":
-                pass_count += 1
-            elif page_res.status == "WARNING":
-                warn_count += 1
-            elif page_res.status == "FAIL":
-                fail_count += 1
+            for page in res_obj.pages:
+                page_res = self.validate_page(page)
+                page_validations.append(page_res)
 
-            if page_res.confidence_score is not None:
-                conf_scores.append(page_res.confidence_score)
+                if page_res.status == "PASS":
+                    pass_count += 1
+                elif page_res.status == "WARNING":
+                    warn_count += 1
+                elif page_res.status == "FAIL":
+                    fail_count += 1
 
-        total_pages = len(res_obj.pages)
+                if page_res.confidence_score is not None:
+                    conf_scores.append(page_res.confidence_score)
 
-        # Rollup overall document status
-        if total_pages == 0 or fail_count > 0:
-            overall_status = "FAIL"
-        elif warn_count > 0:
-            overall_status = "WARNING"
-        else:
-            overall_status = "PASS"
+            total_pages = len(res_obj.pages)
 
-        avg_doc_conf = round(sum(conf_scores) / len(conf_scores), 2) if conf_scores else None
+            # Rollup overall document status
+            if total_pages == 0 or fail_count > 0:
+                overall_status = "FAIL"
+            elif warn_count > 0:
+                overall_status = "WARNING"
+            else:
+                overall_status = "PASS"
 
-        return OCRDocumentValidationResult(
-            document_id=res_obj.document_id,
-            overall_status=overall_status,
-            total_pages=total_pages,
-            passed_pages_count=pass_count,
-            warning_pages_count=warn_count,
-            failed_pages_count=fail_count,
-            avg_document_confidence=avg_doc_conf,
-            page_validations=page_validations,
-        )
+            avg_doc_conf = round(sum(conf_scores) / len(conf_scores), 2) if conf_scores else None
+
+            span.set_attribute("validation.overall_status", overall_status)
+            span.set_attribute("validation.total_pages", total_pages)
+            span.set_attribute("validation.passed_pages_count", pass_count)
+            span.set_attribute("validation.warning_pages_count", warn_count)
+            span.set_attribute("validation.failed_pages_count", fail_count)
+            if avg_doc_conf is not None:
+                span.set_attribute("validation.avg_confidence", avg_doc_conf)
+
+            if overall_status == "FAIL":
+                span.set_status(Status(StatusCode.ERROR, f"OCR Quality Validation FAILED ({fail_count} failed page(s))"))
+            else:
+                span.set_status(Status(StatusCode.OK))
+
+            return OCRDocumentValidationResult(
+                document_id=res_obj.document_id,
+                overall_status=overall_status,
+                total_pages=total_pages,
+                passed_pages_count=pass_count,
+                warning_pages_count=warn_count,
+                failed_pages_count=fail_count,
+                avg_document_confidence=avg_doc_conf,
+                page_validations=page_validations,
+            )
 
 
 def validate_ocr_quality(

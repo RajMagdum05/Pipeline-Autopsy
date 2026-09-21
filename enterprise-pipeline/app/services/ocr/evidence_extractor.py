@@ -17,6 +17,10 @@ from app.services.ocr.document_loader import (
     load_and_validate_document,
 )
 from app.services.ocr.pdf_inspector import PDFInspector, PDFInspectionResult
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+tracer = trace.get_tracer("enterprise_pipeline.ocr")
 
 _tesseract_cmd = os.getenv("TESSERACT_CMD")
 if _tesseract_cmd:
@@ -156,97 +160,111 @@ class OCREvidenceExtractor:
             pages_evidence: List[EvidencePage] = []
 
             for page_idx in range(inspection.total_pages):
-                page = doc[page_idx]
-                raw_text = page.get_text().strip()
-                page_w = round(page.rect.width, 2)
-                page_h = round(page.rect.height, 2)
+                page_num = page_idx + 1
+                with tracer.start_as_current_span(f"ocr_page_{page_num}") as page_span:
+                    page = doc[page_idx]
+                    raw_text = page.get_text().strip()
+                    page_w = round(page.rect.width, 2)
+                    page_h = round(page.rect.height, 2)
 
-                has_meaningful = len(raw_text) > 0 and any(c.isalnum() for c in raw_text)
-                page_status = "DIRECT_TEXT" if has_meaningful else "OCR_REQUIRED"
+                    has_meaningful = len(raw_text) > 0 and any(c.isalnum() for c in raw_text)
+                    page_status = "DIRECT_TEXT" if has_meaningful else "OCR_REQUIRED"
 
-                if not has_meaningful:
-                    # Page lacks direct text -> marked OCR_REQUIRED, page layout metadata retained
-                    pages_evidence.append(
-                        EvidencePage(
-                            page_number=page_idx + 1,
-                            width=page_w,
-                            height=page_h,
-                            raw_text="",
-                            lines=[],
-                            status="OCR_REQUIRED",
+                    page_span.set_attribute("page_number", page_num)
+                    page_span.set_attribute("extraction_method", page_status)
+                    page_span.set_attribute("character_count", len(raw_text))
+
+                    if not has_meaningful:
+                        # Page lacks direct text -> marked OCR_REQUIRED, page layout metadata retained
+                        page_span.set_attribute("word_count", 0)
+                        page_span.set_attribute("status", "OCR_REQUIRED")
+                        page_span.set_status(Status(StatusCode.OK))
+                        pages_evidence.append(
+                            EvidencePage(
+                                page_number=page_num,
+                                width=page_w,
+                                height=page_h,
+                                raw_text="",
+                                lines=[],
+                                status="OCR_REQUIRED",
+                            )
                         )
-                    )
-                    continue
-
-                # Extract words: (x0, y0, x1, y1, word_text, block_no, line_no, word_no)
-                words_data = page.get_text("words")
-                line_groups: Dict[Tuple[int, int], List[Tuple[float, float, float, float, str]]] = {}
-
-                for w in words_data:
-                    x0, y0, x1, y1, word_text = float(w[0]), float(w[1]), float(w[2]), float(w[3]), str(w[4]).strip()
-                    block_no, line_no = int(w[5]), int(w[6])
-                    if not word_text:
                         continue
-                    key = (block_no, line_no)
-                    if key not in line_groups:
-                        line_groups[key] = []
-                    line_groups[key].append((x0, y0, x1, y1, word_text))
 
-                lines: List[EvidenceLine] = []
+                    # Extract words: (x0, y0, x1, y1, word_text, block_no, line_no, word_no)
+                    words_data = page.get_text("words")
+                    line_groups: Dict[Tuple[int, int], List[Tuple[float, float, float, float, str]]] = {}
 
-                for key, word_list in line_groups.items():
-                    evidence_words: List[EvidenceWord] = []
-                    for w in word_list:
-                        bbox = BoundingBox(
-                            x0=round(w[0], 2),
-                            y0=round(w[1], 2),
-                            x1=round(w[2], 2),
-                            y1=round(w[3], 2),
-                        )
-                        evidence_words.append(
-                            EvidenceWord(
-                                text=w[4],
-                                confidence=None,  # PyMuPDF does not provide OCR confidence
-                                bounding_box=bbox,
+                    for w in words_data:
+                        x0, y0, x1, y1, word_text = float(w[0]), float(w[1]), float(w[2]), float(w[3]), str(w[4]).strip()
+                        block_no, line_no = int(w[5]), int(w[6])
+                        if not word_text:
+                            continue
+                        key = (block_no, line_no)
+                        if key not in line_groups:
+                            line_groups[key] = []
+                        line_groups[key].append((x0, y0, x1, y1, word_text))
+
+                    lines: List[EvidenceLine] = []
+
+                    for key, word_list in line_groups.items():
+                        evidence_words: List[EvidenceWord] = []
+                        for w in word_list:
+                            bbox = BoundingBox(
+                                x0=round(w[0], 2),
+                                y0=round(w[1], 2),
+                                x1=round(w[2], 2),
+                                y1=round(w[3], 2),
+                            )
+                            evidence_words.append(
+                                EvidenceWord(
+                                    text=w[4],
+                                    confidence=None,  # PyMuPDF does not provide OCR confidence
+                                    bounding_box=bbox,
+                                )
+                            )
+
+                        if not evidence_words:
+                            continue
+
+                        line_str = " ".join(w.text for w in evidence_words)
+                        min_x0 = min(w.bounding_box.x0 for w in evidence_words)
+                        min_y0 = min(w.bounding_box.y0 for w in evidence_words)
+                        max_x1 = max(w.bounding_box.x1 for w in evidence_words)
+                        max_y1 = max(w.bounding_box.y1 for w in evidence_words)
+
+                        line_bbox = BoundingBox(x0=min_x0, y0=min_y0, x1=max_x1, y1=max_y1)
+
+                        lines.append(
+                            EvidenceLine(
+                                text=line_str,
+                                confidence=None,
+                                bounding_box=line_bbox,
+                                words=evidence_words,
                             )
                         )
 
-                    if not evidence_words:
-                        continue
+                    # Fallback if words was empty but raw_text exists
+                    if not lines and raw_text:
+                        for l_str in raw_text.splitlines():
+                            if l_str.strip():
+                                lines.append(EvidenceLine(text=l_str.strip(), confidence=None, bounding_box=None, words=[]))
 
-                    line_str = " ".join(w.text for w in evidence_words)
-                    min_x0 = min(w.bounding_box.x0 for w in evidence_words)
-                    min_y0 = min(w.bounding_box.y0 for w in evidence_words)
-                    max_x1 = max(w.bounding_box.x1 for w in evidence_words)
-                    max_y1 = max(w.bounding_box.y1 for w in evidence_words)
+                    total_words = sum(len(line.words) for line in lines) if lines else len(raw_text.split())
+                    page_span.set_attribute("word_count", total_words)
+                    page_span.set_attribute("status", "DIRECT_TEXT")
+                    page_span.set_status(Status(StatusCode.OK))
 
-                    line_bbox = BoundingBox(x0=min_x0, y0=min_y0, x1=max_x1, y1=max_y1)
-
-                    lines.append(
-                        EvidenceLine(
-                            text=line_str,
-                            confidence=None,
-                            bounding_box=line_bbox,
-                            words=evidence_words,
+                    pages_evidence.append(
+                        EvidencePage(
+                            page_number=page_num,
+                            width=page_w,
+                            height=page_h,
+                            raw_text=raw_text,
+                            lines=lines,
+                            status="DIRECT_TEXT",
                         )
                     )
-
-                # Fallback if words was empty but raw_text exists
-                if not lines and raw_text:
-                    for l_str in raw_text.splitlines():
-                        if l_str.strip():
-                            lines.append(EvidenceLine(text=l_str.strip(), confidence=None, bounding_box=None, words=[]))
-
-                pages_evidence.append(
-                    EvidencePage(
-                        page_number=page_idx + 1,
-                        width=page_w,
-                        height=page_h,
-                        raw_text=raw_text,
-                        lines=lines,
-                        status="DIRECT_TEXT",
-                    )
-                )
 
             return DetailedOCREvidenceResult(
                 engine="pymupdf",
@@ -309,106 +327,118 @@ class OCREvidenceExtractor:
 
     def _process_image_with_tesseract(self, image: Image.Image, page_number: int) -> EvidencePage:
         """Runs Tesseract image_to_data on a PIL image and returns an EvidencePage."""
-        img_w = float(image.width)
-        img_h = float(image.height)
+        with tracer.start_as_current_span(f"ocr_page_{page_number}") as page_span:
+            page_span.set_attribute("page_number", page_number)
+            page_span.set_attribute("extraction_method", "TESSERACT_OCR")
 
-        try:
-            data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-        except Exception as err:
-            raise DocumentProcessingError(
-                f"Tesseract OCR evidence extraction failed: {str(err)}"
-            ) from err
+            img_w = float(image.width)
+            img_h = float(image.height)
 
-        n_boxes = len(data.get("text", []))
-        line_words_map: Dict[Tuple[int, int, int], List[Dict[str, float | str]]] = {}
+            try:
+                data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+            except Exception as err:
+                page_span.record_exception(err)
+                page_span.set_status(Status(StatusCode.ERROR, str(err)))
+                raise DocumentProcessingError(
+                    f"Tesseract OCR evidence extraction failed: {str(err)}"
+                ) from err
 
-        for i in range(n_boxes):
-            word_str = str(data["text"][i]).strip()
-            conf_val = float(data["conf"][i])
-            if not word_str or conf_val < 0:
-                continue
+            n_boxes = len(data.get("text", []))
+            line_words_map: Dict[Tuple[int, int, int], List[Dict[str, float | str]]] = {}
 
-            block_num = int(data["block_num"][i])
-            par_num = int(data["par_num"][i])
-            line_num = int(data["line_num"][i])
-            key = (block_num, par_num, line_num)
+            for i in range(n_boxes):
+                word_str = str(data["text"][i]).strip()
+                conf_val = float(data["conf"][i])
+                if not word_str or conf_val < 0:
+                    continue
 
-            if key not in line_words_map:
-                line_words_map[key] = []
+                block_num = int(data["block_num"][i])
+                par_num = int(data["par_num"][i])
+                line_num = int(data["line_num"][i])
+                key = (block_num, par_num, line_num)
 
-            left = float(data["left"][i])
-            top = float(data["top"][i])
-            w_w = float(data["width"][i])
-            w_h = float(data["height"][i])
+                if key not in line_words_map:
+                    line_words_map[key] = []
 
-            line_words_map[key].append({
-                "text": word_str,
-                "conf": round(conf_val, 2),
-                "x0": round(left, 2),
-                "y0": round(top, 2),
-                "x1": round(left + w_w, 2),
-                "y1": round(top + w_h, 2),
-            })
+                left = float(data["left"][i])
+                top = float(data["top"][i])
+                w_w = float(data["width"][i])
+                w_h = float(data["height"][i])
 
-        lines: List[EvidenceLine] = []
-        raw_line_texts: List[str] = []
+                line_words_map[key].append({
+                    "text": word_str,
+                    "conf": round(conf_val, 2),
+                    "x0": round(left, 2),
+                    "y0": round(top, 2),
+                    "x1": round(left + w_w, 2),
+                    "y1": round(top + w_h, 2),
+                })
 
-        for key, word_dicts in line_words_map.items():
-            words: List[EvidenceWord] = []
-            for w in word_dicts:
-                bbox = BoundingBox(
-                    x0=float(w["x0"]),
-                    y0=float(w["y0"]),
-                    x1=float(w["x1"]),
-                    y1=float(w["y1"]),
-                )
-                words.append(
-                    EvidenceWord(
-                        text=str(w["text"]),
-                        confidence=float(w["conf"]),
-                        bounding_box=bbox,
+            lines: List[EvidenceLine] = []
+            raw_line_texts: List[str] = []
+
+            for key, word_dicts in line_words_map.items():
+                words: List[EvidenceWord] = []
+                for w in word_dicts:
+                    bbox = BoundingBox(
+                        x0=float(w["x0"]),
+                        y0=float(w["y0"]),
+                        x1=float(w["x1"]),
+                        y1=float(w["y1"]),
+                    )
+                    words.append(
+                        EvidenceWord(
+                            text=str(w["text"]),
+                            confidence=float(w["conf"]),
+                            bounding_box=bbox,
+                        )
+                    )
+
+                if not words:
+                    continue
+
+                line_str = " ".join(w.text for w in words).strip()
+                if not line_str:
+                    continue
+
+                raw_line_texts.append(line_str)
+                avg_conf = round(sum(w.confidence for w in words) / len(words), 2)
+                min_x0 = min(w.bounding_box.x0 for w in words)
+                min_y0 = min(w.bounding_box.y0 for w in words)
+                max_x1 = max(w.bounding_box.x1 for w in words)
+                max_y1 = max(w.bounding_box.y1 for w in words)
+
+                line_bbox = BoundingBox(x0=min_x0, y0=min_y0, x1=max_x1, y1=max_y1)
+
+                lines.append(
+                    EvidenceLine(
+                        text=line_str,
+                        confidence=avg_conf,
+                        bounding_box=line_bbox,
+                        words=words,
                     )
                 )
 
-            if not words:
-                continue
+            raw_text = "\n".join(raw_line_texts)
+            if not raw_text:
+                try:
+                    raw_text = pytesseract.image_to_string(image).strip()
+                except Exception:
+                    raw_text = ""
 
-            line_str = " ".join(w.text for w in words).strip()
-            if not line_str:
-                continue
+            total_words = sum(len(line.words) for line in lines) if lines else len(raw_text.split())
+            page_span.set_attribute("character_count", len(raw_text))
+            page_span.set_attribute("word_count", total_words)
+            page_span.set_attribute("status", "TESSERACT_OCR")
+            page_span.set_status(Status(StatusCode.OK))
 
-            raw_line_texts.append(line_str)
-            avg_conf = round(sum(w.confidence for w in words) / len(words), 2)
-            min_x0 = min(w.bounding_box.x0 for w in words)
-            min_y0 = min(w.bounding_box.y0 for w in words)
-            max_x1 = max(w.bounding_box.x1 for w in words)
-            max_y1 = max(w.bounding_box.y1 for w in words)
-
-            line_bbox = BoundingBox(x0=min_x0, y0=min_y0, x1=max_x1, y1=max_y1)
-
-            lines.append(
-                EvidenceLine(
-                    text=line_str,
-                    confidence=avg_conf,
-                    bounding_box=line_bbox,
-                    words=words,
-                )
+            return EvidencePage(
+                page_number=page_number,
+                width=img_w,
+                height=img_h,
+                raw_text=raw_text,
+                lines=lines,
             )
-
-        raw_text = "\n".join(raw_line_texts)
-        if not raw_text:
-            try:
-                raw_text = pytesseract.image_to_string(image).strip()
-            except Exception:
-                raw_text = ""
-
-        return EvidencePage(
-            page_number=page_number,
-            width=img_w,
-            height=img_h,
-            raw_text=raw_text,
-            lines=lines,
-        )
 
 
 def extract_ocr_evidence(document: Union[ValidatedDocument, str, Path]) -> DetailedOCREvidenceResult:

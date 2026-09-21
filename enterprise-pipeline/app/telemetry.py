@@ -11,25 +11,27 @@ from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 _tracer_provider: Optional[TracerProvider] = None
 
 
-def get_tracer(name: str = "enterprise_pipeline.ocr") -> trace.Tracer:
+def get_tracer(name: str = "enterprise_pipeline") -> trace.Tracer:
     """Returns an OpenTelemetry tracer for the specified instrumentation scope."""
     return trace.get_tracer(name)
 
 
 def init_telemetry(
-    service_name: str = "enterprise-ocr-service",
+    service_name: str = "enterprise-pipeline",
     app=None,
     engine=None,
     exporter=None,
+    use_simple_processor: bool = False,
 ) -> TracerProvider:
     """
     Initializes OpenTelemetry TracerProvider, configures exporters, and registers instrumentations.
 
     Args:
-        service_name: Service identity string for tracing backends.
+        service_name: Service identity string for tracing backends (default: 'enterprise-pipeline').
         app: Optional FastAPI application instance to instrument.
         engine: Optional SQLAlchemy engine instance to instrument.
         exporter: Optional custom SpanExporter (e.g. for testing).
+        use_simple_processor: If True, uses SimpleSpanProcessor for immediate synchronous export.
 
     Returns:
         TracerProvider: Initialized provider.
@@ -49,7 +51,10 @@ def init_telemetry(
         otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
         try:
             otlp_exporter = OTLPSpanExporter(endpoint=otlp_endpoint)
-            provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+            if use_simple_processor:
+                provider.add_span_processor(SimpleSpanProcessor(otlp_exporter))
+            else:
+                provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
         except Exception as e:
             print(f"Warning: Failed to initialize OTLPSpanExporter ({e}). Falling back to ConsoleSpanExporter.")
             provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
@@ -70,3 +75,28 @@ def init_telemetry(
             pass
 
     return provider
+
+
+# Alias for backward compatibility
+setup_telemetry = init_telemetry
+
+
+
+def flush_telemetry(timeout_millis: int = 5000):
+    """Flushes any pending spans in the active tracer provider."""
+    global _tracer_provider
+    if _tracer_provider and hasattr(_tracer_provider, "force_flush"):
+        try:
+            _tracer_provider.force_flush(timeout_millis=timeout_millis)
+        except Exception as err:
+            print(f"Warning: Failed to force flush telemetry: {err}")
+
+
+def shutdown_telemetry():
+    """Shuts down the active tracer provider."""
+    global _tracer_provider
+    if _tracer_provider and hasattr(_tracer_provider, "shutdown"):
+        try:
+            _tracer_provider.shutdown()
+        except Exception:
+            pass
