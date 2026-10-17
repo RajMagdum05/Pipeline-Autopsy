@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import Any, Dict, List, Optional
 
 from autopsy.db.database import get_db
-from autopsy.db.models import ExecutionModel, TraceModel, FailureModel, IncidentModel
+from autopsy.db.models import ExecutionModel, TraceModel, FailureModel, IncidentModel, ProjectModel
 from autopsy.services.ingestion_service import TelemetryIngestionService
 from autopsy.services.reconstruction_service import PipelineReconstructionEngine
 from autopsy.services.failure_detection_service import FailureDetectionService
@@ -23,6 +23,8 @@ from autopsy.api.schemas import (
     RootCauseCandidateResponse,
     DiagnosisResponse,
     AutopsyReportResponse,
+    DashboardSummaryResponse,
+    ExecutionListItemResponse,
     ProjectCreateRequest,
     ProjectResponse,
     ApiKeyCreateRequest,
@@ -38,6 +40,33 @@ failure_service = FailureDetectionService()
 rca_engine = RootCauseAnalysisEngine()
 diagnosis_service = DiagnosisService()
 cred_service = CredentialService()
+
+
+def _resolve_requested_project_id(request: Request, explicit_project_id: Optional[str] = None) -> Optional[str]:
+    auth_project_id = getattr(request.state, "project_id", None) if hasattr(request, "state") else None
+    return auth_project_id or explicit_project_id or extract_project_id(request)
+
+
+def _execution_list_item(exec_rec: ExecutionModel, db: Session) -> ExecutionListItemResponse:
+    traces = db.query(TraceModel).filter_by(execution_id=exec_rec.id).all()
+    trace_ids = [t.trace_id for t in traces]
+    failure_count = db.query(FailureModel).filter_by(execution_id=exec_rec.id).count()
+
+    return ExecutionListItemResponse(
+        execution_id=exec_rec.id,
+        pipeline_id=exec_rec.pipeline_id,
+        status=exec_rec.status,
+        started_at=exec_rec.started_at.isoformat() if exec_rec.started_at else None,
+        ended_at=exec_rec.ended_at.isoformat() if exec_rec.ended_at else None,
+        duration_ms=exec_rec.duration_ms,
+        trace_ids=trace_ids,
+        primary_trace_id=trace_ids[0] if trace_ids else None,
+        failure_count=failure_count,
+        reconstruction_status="COMPLETE" if traces else "NO_TRACES",
+        analysis_status="ANALYZED" if exec_rec.status != "PENDING" else "PENDING",
+        environment=exec_rec.environment,
+        trigger_type=exec_rec.trigger_type,
+    )
 
 
 
@@ -136,6 +165,119 @@ async def ingest_otlp_traces(
 # =====================================================================
 # 2. Versioned Customer REST API: /api/v1/executions/...
 # =====================================================================
+@router.get(
+    "/api/v1/dashboard",
+    response_model=DashboardSummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get customer dashboard summary",
+    tags=["Executions API"],
+)
+def get_dashboard_summary(
+    request: Request,
+    project_id: Optional[str] = Query(None, description="Optional project ID filter"),
+    limit: int = Query(10, ge=1, le=50, description="Maximum recent executions/findings to return"),
+    db: Session = Depends(get_db),
+    api_key: Optional[str] = Depends(verify_api_key),
+):
+    """
+    Returns a compact customer dashboard summary using persisted project, execution,
+    trace, and failure records. No analysis is performed in this endpoint.
+    """
+    req_proj = _resolve_requested_project_id(request, project_id)
+
+    exec_query = db.query(ExecutionModel)
+    if req_proj:
+        exec_query = exec_query.filter(ExecutionModel.project_id == req_proj)
+    executions = exec_query.order_by(ExecutionModel.started_at.desc()).limit(limit).all()
+
+    project = None
+    if req_proj:
+        project = db.query(ProjectModel).filter_by(id=req_proj).first()
+    elif executions:
+        project = db.query(ProjectModel).filter_by(id=executions[0].project_id).first()
+
+    recent_executions = [_execution_list_item(e, db) for e in executions]
+
+    failure_query = db.query(FailureModel)
+    if req_proj:
+        failure_query = failure_query.join(ExecutionModel, FailureModel.execution_id == ExecutionModel.id).filter(
+            ExecutionModel.project_id == req_proj
+        )
+    recent_failure_records = failure_query.order_by(FailureModel.created_at.desc()).limit(limit).all()
+
+    recent_findings = []
+    for f in recent_failure_records:
+        attrs = f.attributes or {}
+        recent_findings.append(
+            {
+                "failure_id": f.id,
+                "execution_id": f.execution_id,
+                "trace_id": f.trace_id,
+                "span_id": f.span_id,
+                "service_name": attrs.get("service_name", "unknown_service"),
+                "operation_name": attrs.get("operation_name", "unknown_operation"),
+                "failure_type": f.failure_type,
+                "severity": f.severity,
+                "error_class": f.error_class,
+                "description": f.description,
+                "evidence_ids": f.evidence_ids or [],
+                "root_cause_hypothesis": f.root_cause_hypothesis,
+            }
+        )
+
+    latest_trace_time = None
+    trace_query = db.query(TraceModel)
+    if req_proj:
+        trace_query = trace_query.join(ExecutionModel, TraceModel.execution_id == ExecutionModel.id).filter(
+            ExecutionModel.project_id == req_proj
+        )
+    latest_trace = trace_query.order_by(TraceModel.start_time.desc()).first()
+    if latest_trace:
+        latest_trace_time = latest_trace.start_time or latest_trace.end_time
+
+    if latest_trace_time:
+        connection_status = "CONNECTED"
+    elif executions or project:
+        connection_status = "NO_RECENT_DATA"
+    else:
+        connection_status = "DISCONNECTED"
+
+    return DashboardSummaryResponse(
+        project_id=req_proj or (project.id if project else None),
+        project_name=project.name if project else None,
+        connection_status=connection_status,
+        last_telemetry_received_at=latest_trace_time.isoformat() if latest_trace_time else None,
+        recent_executions=recent_executions,
+        recent_findings=recent_findings,
+    )
+
+
+@router.get(
+    "/api/v1/executions",
+    response_model=List[ExecutionListItemResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List recent executions",
+    tags=["Executions API"],
+)
+def list_executions(
+    request: Request,
+    project_id: Optional[str] = Query(None, description="Optional project ID filter"),
+    limit: int = Query(25, ge=1, le=100, description="Maximum executions to return"),
+    db: Session = Depends(get_db),
+    api_key: Optional[str] = Depends(verify_api_key),
+):
+    """
+    Returns recent executions for the dashboard. Results are project-scoped when
+    a project is authenticated or supplied.
+    """
+    req_proj = _resolve_requested_project_id(request, project_id)
+    query = db.query(ExecutionModel)
+    if req_proj:
+        query = query.filter(ExecutionModel.project_id == req_proj)
+    executions = query.order_by(ExecutionModel.started_at.desc()).limit(limit).all()
+    return [_execution_list_item(e, db) for e in executions]
+
+
 @router.get(
     "/api/v1/executions/{execution_id}",
     response_model=ExecutionResponse,
@@ -746,4 +888,3 @@ def investigate_trace_legacy(trace_id: str, max_tool_calls: int = 10, use_llm: b
 @router.get("/health", status_code=status.HTTP_200_OK, tags=["Health"])
 def health_check():
     return {"status": "ok", "service": "pipeline-autopsy-engine", "version": "0.1.0"}
-

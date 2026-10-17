@@ -45,9 +45,11 @@ from decimal import Decimal
 from pathlib import Path
 from datetime import datetime, timezone
 
-# Force UTF-8 output on Windows
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+# Force UTF-8 output on Windows if run directly
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # ---------------------------------------------------------------------------
 # 1. Environment Setup
@@ -55,7 +57,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 os.environ.setdefault("DATABASE_URL", "sqlite:///e2e_integration_test.db")
 
 from dotenv import load_dotenv
-repo_root = Path(__file__).resolve().parent
+repo_root = Path(__file__).resolve().parents[1]
 load_dotenv(repo_root / ".env")
 load_dotenv(repo_root.parent / ".env")
 

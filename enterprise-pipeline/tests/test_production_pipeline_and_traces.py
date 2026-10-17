@@ -10,7 +10,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from main import app
+from app.main import app
 from app.database import SessionLocal, Base, engine
 from app.models import Claim, Document
 from app.services.ocr import (

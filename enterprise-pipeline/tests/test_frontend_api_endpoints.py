@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 # Ensure enterprise-pipeline is on sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.main import app
 from app.database import get_db, SessionLocal
@@ -26,14 +26,14 @@ def test_frontend_pipeline_flow():
     print(f"1. Claim created: #{claim_id} ({claim['customer_name']}, INR {claim['claim_amount']})")
     
     # 2. Upload Document (use existing claim PDF from Artifact if available, or create a mock PDF)
-    sample_pdf_path = Path(__file__).resolve().parents[1] / "Artifact" / "claim_101" / "medical_bill.pdf"
+    sample_pdf_path = Path(__file__).resolve().parents[2] / "Artifact" / "claim_101" / "medical_bill.pdf"
     if not sample_pdf_path.exists():
         # Fallback to creating a test PDF if not found
         import fitz
         doc = fitz.open()
         page = doc.new_page()
         page.insert_text((50, 50), "HOSPITAL INVOICE\nPatient: Suresh Patel\nPolicy: POL-998822\nHospital: Apollo Hospitals\nAdmission: 2024-01-10\nDischarge: 2024-01-12\nTotal Bill: INR 52000\nDiagnosis: Acute Appendicitis (K35.8)")
-        sample_pdf_path = Path("test_sample_bill.pdf")
+        sample_pdf_path = Path(__file__).resolve().parent / "test_sample_bill.pdf"
         doc.save(str(sample_pdf_path))
         doc.close()
     
