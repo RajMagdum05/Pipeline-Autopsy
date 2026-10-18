@@ -6,7 +6,12 @@ and invokes the AutopsyInvestigationAgent to inspect the full investigation life
 tool step trace, and structured investigation report.
 """
 import json
+import os
+import sys
 import time
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
 from fastapi.testclient import TestClient
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
