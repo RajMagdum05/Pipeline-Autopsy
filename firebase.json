@@ -1,0 +1,24 @@
+{
+  "hosting": {
+    "public": "website",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+  "auth": {
+    "providers": {
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "Pipeline Autopsy",
+        "supportEmail": "yumyoo007@gmail.com"
+      }
+    }
+  }
+}
