@@ -1,0 +1,56 @@
+services:
+  autopsy:
+    build:
+      context: .
+      dockerfile: autopsy/Dockerfile
+    container_name: autopsy-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - AUTOPSY_DATABASE_URL=sqlite:////app/autopsy.db
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - autopsy_data:/app
+    restart: unless-stopped
+
+  enterprise-pipeline:
+    build:
+      context: .
+      dockerfile: enterprise-pipeline/Dockerfile
+    container_name: enterprise-pipeline
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:////app/pipeline_autopsy.db
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://autopsy:8080/v1/traces
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    depends_on:
+      autopsy:
+        condition: service_healthy
+    volumes:
+      - pipeline_data:/app
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: autopsy-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - enterprise-pipeline
+    restart: unless-stopped
+
+  website:
+    build:
+      context: .
+      dockerfile: website/Dockerfile
+    container_name: autopsy-website
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  autopsy_data:
+  pipeline_data:
