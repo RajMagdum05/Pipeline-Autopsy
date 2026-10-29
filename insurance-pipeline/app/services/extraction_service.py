@@ -418,6 +418,7 @@ def extract_claim_from_validated_ocr(
     documents: List[Dict[str, Any] | Any],
     db_session: Any = None,
     allow_fallback: bool = False,
+    execution_id: Optional[str] = None,
 ) -> ValidatedExtractionResult:
     """
     Extracts one claim-level structured extraction result from validated OCR documents using Gemini API,
@@ -432,23 +433,51 @@ def extract_claim_from_validated_ocr(
     6. Persist extraction record to DB if `db_session` provided.
     7. Return validated `ValidatedExtractionResult`.
     """
-    execution_id = f"exec_{uuid.uuid4().hex[:12]}"
+    exec_id = execution_id or f"EXEC-{uuid.uuid4().hex[:12].upper()}"
+    input_art_id = f"art_ocr_claim_{claim_id}"
+    evidence_art_id = f"art_evidence_claim_{claim_id}"
+    output_art_id = f"art_extracted_claim_{claim_id}"
 
     # 1. Check API Key
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
         if allow_fallback:
             logger.warning("GEMINI_API_KEY missing. Using fallback parser (allow_fallback=True).")
-            payload = build_claim_extraction_input(claim_id, documents)
-            fallback_res = _fallback_offline_extraction(payload)
-            return validate_and_finalize_extraction(
-                raw_response=fallback_res.model_dump(),
-                claim_id=claim_id,
-                execution_id=execution_id,
-                extraction_model="offline_fallback",
-                db_session=db_session,
-                payload=payload,
-            )
+            with tracer.start_as_current_span("information_extraction") as span:
+                span.set_attribute("claim_id", claim_id)
+                span.set_attribute(EXECUTION_ID, exec_id)
+                span.set_attribute(EXECUTION_ENTITY_ID, str(claim_id))
+                span.set_attribute(PIPELINE_NAME, PIPELINE_NAME_VAL)
+                span.set_attribute(PIPELINE_VERSION, PIPELINE_VERSION_VAL)
+                span.set_attribute(STAGE_NAME, "information_extraction")
+                span.set_attribute(STAGE_VERSION, "1.0.0")
+                span.set_attribute(INPUT_ARTIFACT_IDS, [input_art_id, evidence_art_id])
+                span.set_attribute(OUTPUT_ARTIFACT_IDS, [output_art_id])
+                span.set_attribute("extraction.input_artifact_id", input_art_id)
+                span.set_attribute("extraction.source_evidence_artifact_id", evidence_art_id)
+                span.set_attribute(RETRY_COUNT, 0)
+                payload = build_claim_extraction_input(claim_id, documents)
+                fallback_res = _fallback_offline_extraction(payload)
+                extracted_fields = ["patient_name", "hospital", "diagnosis", "treatment", "date", "amount"]
+                extracted_values = {
+                    "hospital": fallback_res.hospital,
+                    "diagnosis": fallback_res.diagnosis,
+                    "treatment": fallback_res.treatment,
+                    "date": fallback_res.date,
+                    "amount": str(fallback_res.amount) if fallback_res.amount is not None else None,
+                }
+                span.set_attribute("extraction.extracted_fields", extracted_fields)
+                span.set_attribute("extraction.extracted_values", json.dumps(extracted_values))
+                span.set_attribute(STAGE_STATUS, "completed")
+                span.set_status(Status(StatusCode.OK))
+                return validate_and_finalize_extraction(
+                    raw_response=fallback_res.model_dump(),
+                    claim_id=claim_id,
+                    execution_id=exec_id,
+                    extraction_model="offline_fallback",
+                    db_session=db_session,
+                    payload=payload,
+                )
         raise ExtractionConfigError(
             "GEMINI_API_KEY environment variable is missing. "
             "Please add GEMINI_API_KEY to your .env file."
@@ -470,14 +499,30 @@ def extract_claim_from_validated_ocr(
 
     with tracer.start_as_current_span("information_extraction") as span:
         span.set_attribute("claim_id", claim_id)
-        span.set_attribute("execution_id", execution_id)
+        span.set_attribute(EXECUTION_ID, exec_id)
+        span.set_attribute(EXECUTION_ENTITY_ID, str(claim_id))
+        span.set_attribute(PIPELINE_NAME, PIPELINE_NAME_VAL)
+        span.set_attribute(PIPELINE_VERSION, PIPELINE_VERSION_VAL)
+        span.set_attribute(STAGE_NAME, "information_extraction")
+        span.set_attribute(STAGE_VERSION, "1.0.0")
+        span.set_attribute(INPUT_ARTIFACT_IDS, [input_art_id, evidence_art_id])
+        span.set_attribute(OUTPUT_ARTIFACT_IDS, [output_art_id])
+        span.set_attribute("extraction.input_artifact_id", input_art_id)
+        span.set_attribute("extraction.source_evidence_artifact_id", evidence_art_id)
         span.set_attribute("extraction.prompt_version", EXTRACTION_PROMPT_VERSION)
         span.set_attribute("extraction.total_documents", payload.total_documents)
         span.set_attribute("extraction.total_validated_pages", payload.total_validated_pages)
+        span.set_attribute(RETRY_COUNT, 0)
 
+        fallback_count = 0
         try:
             client = genai.Client(api_key=api_key)
-            for model_name in PREFERRED_GEMINI_MODELS:
+            for model_idx, model_name in enumerate(PREFERRED_GEMINI_MODELS):
+                if model_idx > 0:
+                    fallback_count += 1
+                    span.set_attribute(RETRY_COUNT, fallback_count)
+                    if api_errors:
+                        span.set_attribute(RETRY_REASON, api_errors[-1])
                 try:
                     logger.info(f"Executing Information Extraction for Claim #{claim_id} using model '{model_name}'...")
                     response = client.models.generate_content(
@@ -501,14 +546,30 @@ def extract_claim_from_validated_ocr(
 
             if not raw_response_text:
                 if allow_fallback:
+                    fallback_count += 1
+                    span.set_attribute(RETRY_COUNT, fallback_count)
+                    if api_errors:
+                        span.set_attribute(RETRY_REASON, api_errors[-1])
                     logger.warning("All Gemini API model calls failed. Using fallback offline parser.")
                     fallback_res = _fallback_offline_extraction(payload)
                     span.set_attribute("extraction.model", "offline_fallback")
                     span.set_attribute("extraction.status", "FALLBACK")
+                    extracted_fields = ["patient_name", "hospital", "diagnosis", "treatment", "date", "amount"]
+                    extracted_values = {
+                        "hospital": fallback_res.hospital,
+                        "diagnosis": fallback_res.diagnosis,
+                        "treatment": fallback_res.treatment,
+                        "date": fallback_res.date,
+                        "amount": str(fallback_res.amount) if fallback_res.amount is not None else None,
+                    }
+                    span.set_attribute("extraction.extracted_fields", extracted_fields)
+                    span.set_attribute("extraction.extracted_values", json.dumps(extracted_values))
+                    span.set_attribute(STAGE_STATUS, "completed")
+                    span.set_status(Status(StatusCode.OK))
                     return validate_and_finalize_extraction(
                         raw_response=fallback_res.model_dump(),
                         claim_id=claim_id,
-                        execution_id=execution_id,
+                        execution_id=exec_id,
                         extraction_model="offline_fallback",
                         db_session=db_session,
                         payload=payload,
@@ -516,14 +577,48 @@ def extract_claim_from_validated_ocr(
                 clean_errors = [e.replace(api_key, "[REDACTED_API_KEY]") for e in api_errors]
                 api_exc = ExtractionAPIError(f"Gemini API execution failed across all models: {'; '.join(clean_errors)}")
                 span.record_exception(api_exc)
+                span.set_attribute(STAGE_STATUS, "failed")
+                span.set_attribute("error.type", type(api_exc).__name__)
+                span.set_attribute("error.message", str(api_exc))
                 span.set_status(Status(StatusCode.ERROR, str(api_exc)))
                 raise api_exc
 
             span.set_attribute("extraction.model", used_model or "gemini")
             span.set_attribute("extraction.status", "RAW_EXTRACTED")
+
+            # Parse small scalar extracted values and extracted field names
+            extracted_fields: List[str] = []
+            extracted_values: Dict[str, Any] = {}
+            if raw_response_text:
+                try:
+                    cleaned_str = raw_response_text.strip()
+                    if cleaned_str.startswith("```json"):
+                        cleaned_str = cleaned_str[7:]
+                    if cleaned_str.startswith("```"):
+                        cleaned_str = cleaned_str[3:]
+                    if cleaned_str.endswith("```"):
+                        cleaned_str = cleaned_str[:-3]
+                    cleaned_str = cleaned_str.strip()
+                    parsed_dict = json.loads(cleaned_str)
+                    if isinstance(parsed_dict, dict):
+                        extracted_fields = list(parsed_dict.keys())
+                        for k, v in parsed_dict.items():
+                            if k in ("patient_name", "customer_name", "insured_name", "claimant_name", "notes", "source_references", "additional_information"):
+                                continue
+                            if isinstance(v, (int, float, bool)) or (isinstance(v, str) and len(v) < 100):
+                                extracted_values[k] = v
+                except Exception:
+                    pass
+
+            span.set_attribute("extraction.extracted_fields", extracted_fields)
+            span.set_attribute("extraction.extracted_values", json.dumps(extracted_values))
+            span.set_attribute(STAGE_STATUS, "completed")
             span.set_status(Status(StatusCode.OK))
 
         except Exception as exc:
+            span.set_attribute(STAGE_STATUS, "failed")
+            span.set_attribute("error.type", type(exc).__name__)
+            span.set_attribute("error.message", str(exc))
             if not isinstance(exc, ExtractionServiceError):
                 span.record_exception(exc)
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
@@ -533,7 +628,7 @@ def extract_claim_from_validated_ocr(
     return validate_and_finalize_extraction(
         raw_response=raw_response_text,
         claim_id=claim_id,
-        execution_id=execution_id,
+        execution_id=exec_id,
         extraction_model=used_model or "gemini",
         db_session=db_session,
         payload=payload,

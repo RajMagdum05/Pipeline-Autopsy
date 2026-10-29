@@ -44,6 +44,8 @@ def init_telemetry(
 
     # Reset global OpenTelemetry provider internal state to allow re-initialization in test fixtures
     trace._TRACER_PROVIDER = None
+    if hasattr(trace, "_TRACER_PROVIDER_SET_ONCE"):
+        trace._TRACER_PROVIDER_SET_ONCE._done = False
 
     resource = Resource.create(attributes={SERVICE_NAME: service_name})
     provider = TracerProvider(resource=resource)
