@@ -9,11 +9,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.telemetry import setup_telemetry, flush_telemetry
-from app.database import SessionLocal
-from app.init_db import init_db
+from app.database import SessionLocal, init_db
 from app.models.claim import Claim
 from app.models.document import Document
-from app.services.pipeline_orchestrator import run_claim_pipeline
+from app.pipeline_services.orchestrator import run_claim_pipeline
 
 
 def create_sample_pdf(file_path: Path, text_content: str):

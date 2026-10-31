@@ -7,12 +7,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.telemetry import setup_telemetry, flush_telemetry
-from app.database import SessionLocal
-from app.init_db import init_db
+from app.database import SessionLocal, init_db
 from app.models.claim import Claim
 from app.models.document import Document
-from app.services.pipeline_orchestrator import run_claim_pipeline, PipelineExecutionError
-from app.services.extraction_service import validate_and_finalize_extraction, ExtractionValidationError
+from app.pipeline_services.orchestrator import run_claim_pipeline, PipelineExecutionError
+from app.pipeline_services.extraction import validate_and_finalize_extraction, ExtractionValidationError
 
 
 def test_failure_telemetry_recording():

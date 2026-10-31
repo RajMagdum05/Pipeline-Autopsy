@@ -142,9 +142,4 @@ class RuleEngineDecision(BaseModel):
     created_at: str | None = Field(default=None, description="ISO timestamp")
 
 
-# Schema for structured policy reasoning output
-class ClaimReasoningResult(BaseModel):
-    eligible: bool | None = None
-    reasoning: str
-    supporting_policy_text: str | None = None
-    confidence: float
+

@@ -115,7 +115,6 @@ from app.services.rule_engine_service import (
     evaluate_claim_rules,
     RuleEngineInputError,
 )
-from app.services.document_processor import process_document as legacy_process_document
 
 # ---------------------------------------------------------------------------
 # Formatting Helpers

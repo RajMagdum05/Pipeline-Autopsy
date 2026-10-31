@@ -1,7 +1,6 @@
 from app.database.models import (
     Claim,
     Document,
-    PolicyChunk,
     OCRResultRecord,
     ExtractionResultRecord,
     RuleEvaluationRecord,
@@ -10,7 +9,6 @@ from app.database.models import (
 __all__ = [
     "Claim",
     "Document",
-    "PolicyChunk",
     "OCRResultRecord",
     "ExtractionResultRecord",
     "RuleEvaluationRecord",

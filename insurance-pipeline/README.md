@@ -6,17 +6,35 @@ An independent, production-grade insurance claim adjudication AI pipeline. It pr
 
 ---
 
-## 🔄 Core Pipeline Stages
+## 🔄 Core Pipeline Services (`app/pipeline_services/`)
 
 ```
-document_processing ──> information_extraction ──> policy_retrieval ──> claim_decision ──> decision_validation
+document_processing (OCR) ──▶ information_extraction (Gemini) ──▶ rule_engine (Adjudication) ──▶ final_result
 ```
 
-1. **Document Processing**: Staging, PDF text extraction, rendering, and OCR preprocessing.
-2. **Information Extraction**: LLM-assisted structured extraction of patient, billing, and diagnosis records.
-3. **Policy Retrieval**: Policy term lookup and RAG similarity matching.
-4. **Claim Decision**: Business adjudication and rule evaluation.
-5. **Decision Validation**: Deterministic sanity checks and compliance guardrails.
+All backend pipeline logic is organized into clean, dedicated service modules under `app/pipeline_services/`:
+
+1. **`ocr/`**:
+   - `document_loader.py`: Safe document ingestion, SHA-256 integrity validation, and MIME-type verification.
+   - `pdf_inspector.py`: PDF structure inspection, embedded font/text stream detection, and page routing.
+   - `page_renderer.py`: High-DPI image rendering for scanned or image-only PDF pages.
+   - `image_preprocessor.py`: Grayscale conversion, adaptive thresholding, and noise reduction.
+   - `pymupdf_extractor.py`: Fast direct text and word bounding box extraction for digital PDFs.
+   - `tesseract_provider.py`: Fallback OCR for scanned pages and image files (PNG/JPG).
+   - `normalizer.py`: Unifies raw text into canonical `OCRResult`, `OCRPage`, and `OCRLine` structures.
+   - `quality_validator.py`: Page-by-page OCR quality checks to ensure unreadable pages do not reach the LLM.
+   - `persistence_service.py`: Stores structured OCR results into the PostgreSQL/SQLite database.
+   - `evidence_extractor.py`: Extracts word-level coordinates and line spans for auditability.
+   - `orchestrator.py` (`OCRApplicationService`): Coordinates the complete document OCR lifecycle.
+
+2. **`extraction/`**:
+   - `extraction_service.py`: Uses Google Gemini to extract structured entities (patient details, diagnosis codes, dates, billing amounts) from validated OCR text, with Pydantic schema validation, sanity checks, retry handling, and source citations.
+
+3. **`rule_engine/`**:
+   - `rule_engine_service.py`: Deterministic adjudication evaluating 8 business rules (policy active, coverage limits, covered claim types, waiting periods, deductibles, co-pays, exclusions, and timely filing) to compute approval verdict and payout.
+
+4. **`orchestrator/`**:
+   - `pipeline_orchestrator.py` (`run_claim_pipeline`): Orchestrates the complete pipeline under a single root OpenTelemetry trace (`claim_processing`), managing execution state and database persistence.
 
 ---
 
@@ -24,7 +42,7 @@ document_processing ──> information_extraction ──> policy_retrieval ─�
 
 ### Option 1: Running with Docker Compose (Recommended)
 
-Starts the Insurance Pipeline API, PostgreSQL database (with pgvector), and Arize Phoenix trace visualizer:
+Starts the Insurance Pipeline API, PostgreSQL database, and Arize Phoenix trace visualizer:
 
 ```bash
 # 1. Copy environment template
@@ -53,16 +71,6 @@ cp .env.example .env
 # 4. Start the application
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
-
----
-
-## ⚙️ Configuration (`.env`)
-
-| Variable | Description | Default |
-|:---|:---|:---|
-| `DATABASE_URL` | PostgreSQL connection string or SQLite fallback | `postgresql+psycopg://pipeline:changeme@localhost:5432/insurance_pipeline` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Target OTLP trace ingestion endpoint | `http://127.0.0.1:4318/v1/traces` |
-| `GEMINI_API_KEY` | Google Gemini API key for structured extraction | Required for AI extraction stages |
 
 ---
 

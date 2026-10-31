@@ -10,7 +10,7 @@ from opentelemetry.trace import Status, StatusCode
 from app.database import get_db
 from app.models import Claim, Document
 from app.schemas import DocumentResponse, OCRResult
-from app.services.ocr import (
+from app.pipeline_services.ocr import (
     OCRApplicationService,
     OCRPersistenceService,
     DocumentProcessingError,

@@ -8,7 +8,7 @@ from opentelemetry.trace import Status, StatusCode
 from app.database import get_db
 from app.models import Claim, ExtractionResultRecord, RuleEvaluationRecord, Document, OCRResultRecord
 from app.schemas import ClaimCreate, ClaimResponse
-from app.services.pipeline_orchestrator import run_claim_pipeline
+from app.pipeline_services.orchestrator import run_claim_pipeline
 
 router = APIRouter()
 tracer = trace.get_tracer("enterprise_pipeline.claims")

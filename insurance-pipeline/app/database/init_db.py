@@ -3,7 +3,6 @@ from app.database.connection import Base, engine
 from app.database.models import (
     Claim,
     Document,
-    PolicyChunk,
     OCRResultRecord,
     ExtractionResultRecord,
     RuleEvaluationRecord,
@@ -12,15 +11,6 @@ from app.database.models import (
 
 def init_db():
     is_sqlite = str(engine.url).startswith("sqlite")
-
-    if not is_sqlite:
-        try:
-            print("Enabling pgvector extension on PostgreSQL...")
-            with engine.connect() as conn:
-                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-                conn.commit()
-        except Exception as e:
-            print(f"Skipping vector extension: {e}")
 
     print("Creating database tables...")
     Base.metadata.create_all(bind=engine)
