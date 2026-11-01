@@ -37,6 +37,7 @@ from app.telemetry.attributes import (
     ERROR_TYPE,
     ERROR_MESSAGE,
 )
+from app.telemetry.span_helpers import stage_span
 
 tracer = trace.get_tracer("enterprise_pipeline.ocr")
 
@@ -129,6 +130,7 @@ class OCREvidenceExtractor:
         document: Union[ValidatedDocument, str, Path],
         claim_id: Optional[Union[int, str]] = None,
         execution_id: Optional[str] = None,
+        inspection: Optional[PDFInspectionResult] = None,
     ) -> DetailedOCREvidenceResult:
         """
         Extracts detailed OCR evidence from a document.
@@ -155,7 +157,11 @@ class OCREvidenceExtractor:
 
         if ext == ".pdf":
             # Inspect PDF to check if digital embedded text is present
-            inspection = self.inspector.inspect(validated_doc, claim_id=claim_id, execution_id=execution_id)
+            inspection = inspection or self.inspector.inspect(
+                validated_doc,
+                claim_id=claim_id,
+                execution_id=execution_id,
+            )
             if inspection.has_embedded_text:
                 return self._extract_pymupdf_evidence(validated_doc, inspection, claim_id=claim_id, execution_id=execution_id)
             else:
@@ -177,15 +183,16 @@ class OCREvidenceExtractor:
     ) -> Tuple[Union[int, str], str, List[str], List[str]]:
         curr_claim_id = claim_id
         curr_exec_id = execution_id
-        if not curr_claim_id or not curr_exec_id:
-            curr_span = trace.get_current_span()
-            if curr_span and hasattr(curr_span, "attributes") and curr_span.attributes:
-                curr_claim_id = curr_claim_id or curr_span.attributes.get("claim_id") or curr_span.attributes.get("execution.entity_id")
-                curr_exec_id = curr_exec_id or curr_span.attributes.get("execution.id")
+        curr_span = trace.get_current_span()
+        if curr_span and hasattr(curr_span, "attributes") and curr_span.attributes:
+            curr_claim_id = curr_claim_id or curr_span.attributes.get("claim_id") or curr_span.attributes.get("execution.entity_id")
+            curr_exec_id = curr_exec_id or curr_span.attributes.get("execution.id")
+            default_doc_ref = curr_span.attributes.get("document_id") or default_doc_ref
         curr_claim_id = curr_claim_id or 1
         curr_exec_id = curr_exec_id or f"EXEC-{uuid.uuid4().hex[:12].upper()}"
-        input_artifacts = [f"doc_{default_doc_ref}"]
-        output_artifacts = [f"art_ocr_{default_doc_ref}"]
+        doc_ref = str(default_doc_ref) if str(default_doc_ref).isdigit() else "unknown"
+        input_artifacts = [f"doc_{doc_ref}"]
+        output_artifacts = [f"art_ocr_{doc_ref}"]
         return curr_claim_id, curr_exec_id, input_artifacts, output_artifacts
 
     def _extract_pymupdf_evidence(
@@ -196,8 +203,13 @@ class OCREvidenceExtractor:
         execution_id: Optional[str] = None,
     ) -> DetailedOCREvidenceResult:
         """Extracts word and line evidence for digital PDFs using PyMuPDF."""
-        c_id, exec_id, in_arts, out_arts = self._resolve_context(claim_id, execution_id, validated_doc.file_name)
-        with tracer.start_as_current_span("pymupdf_text_extraction") as extract_span:
+        c_id, exec_id, in_arts, out_arts = self._resolve_context(claim_id, execution_id, "unknown")
+        with stage_span(
+            tracer=tracer, stage_name="pymupdf_text_extraction", execution_id=exec_id,
+            entity_id=str(c_id), input_artifact_ids=in_arts,
+            extra_attributes={"extraction.method": "pymupdf", "extraction.page_count": inspection.total_pages},
+            safe_error_message="PyMuPDF text extraction failed.",
+        ) as extract_span:
             extract_span.set_attribute("claim_id", c_id)
             extract_span.set_attribute(EXECUTION_ID, exec_id)
             extract_span.set_attribute(EXECUTION_ENTITY_ID, str(c_id))
@@ -206,7 +218,7 @@ class OCREvidenceExtractor:
             extract_span.set_attribute(STAGE_NAME, "pymupdf_text_extraction")
             extract_span.set_attribute(STAGE_VERSION, "1.0.0")
             extract_span.set_attribute(INPUT_ARTIFACT_IDS, in_arts)
-            extract_span.set_attribute(OUTPUT_ARTIFACT_IDS, out_arts)
+            extract_span.set_attribute(OUTPUT_ARTIFACT_IDS, [])
             extract_span.set_attribute("extraction.method", "pymupdf")
             extract_span.set_attribute("extraction.page_count", inspection.total_pages)
 
@@ -225,7 +237,12 @@ class OCREvidenceExtractor:
 
                     for page_idx in range(inspection.total_pages):
                         page_num = page_idx + 1
-                        with tracer.start_as_current_span(f"ocr_page_{page_num}") as page_span:
+                        with stage_span(
+                            tracer=tracer, stage_name="ocr_page_extraction", span_name=f"ocr_page_{page_num}",
+                            execution_id=exec_id, entity_id=str(c_id), input_artifact_ids=in_arts,
+                            extra_attributes={"page_number": page_num},
+                            safe_error_message="OCR page extraction failed.",
+                        ) as page_span:
                             page = doc[page_idx]
                             raw_text = page.get_text().strip()
                             total_text_length += len(raw_text)
@@ -332,8 +349,7 @@ class OCREvidenceExtractor:
                             )
 
                     extract_span.set_attribute("extraction.text_length", total_text_length)
-                    extract_span.set_attribute(STAGE_STATUS, "completed")
-                    extract_span.set_status(Status(StatusCode.OK))
+                    extract_span.set_attribute(OUTPUT_ARTIFACT_IDS, out_arts)
 
                     return DetailedOCREvidenceResult(
                         engine="pymupdf",
@@ -344,11 +360,6 @@ class OCREvidenceExtractor:
                 finally:
                     doc.close()
             except Exception as err:
-                extract_span.record_exception(err)
-                extract_span.set_status(Status(StatusCode.ERROR, str(err)))
-                extract_span.set_attribute(STAGE_STATUS, "failed")
-                extract_span.set_attribute("error.type", type(err).__name__)
-                extract_span.set_attribute("error.message", str(err))
                 raise
 
     def _extract_tesseract_image_evidence(
@@ -358,8 +369,13 @@ class OCREvidenceExtractor:
         execution_id: Optional[str] = None,
     ) -> DetailedOCREvidenceResult:
         """Extracts word and line evidence for raster images using Tesseract image_to_data."""
-        c_id, exec_id, in_arts, out_arts = self._resolve_context(claim_id, execution_id, validated_doc.file_name)
-        with tracer.start_as_current_span("ocr_text_extraction") as ocr_span:
+        c_id, exec_id, in_arts, out_arts = self._resolve_context(claim_id, execution_id, "unknown")
+        with stage_span(
+            tracer=tracer, stage_name="ocr_text_extraction", execution_id=exec_id,
+            entity_id=str(c_id), input_artifact_ids=in_arts,
+            extra_attributes={"ocr.engine": "tesseract", "ocr.language": "eng", "ocr.page_count": 1},
+            safe_error_message="Tesseract image extraction failed.",
+        ) as ocr_span:
             ocr_span.set_attribute("claim_id", c_id)
             ocr_span.set_attribute(EXECUTION_ID, exec_id)
             ocr_span.set_attribute(EXECUTION_ENTITY_ID, str(c_id))
@@ -368,7 +384,7 @@ class OCREvidenceExtractor:
             ocr_span.set_attribute(STAGE_NAME, "ocr_text_extraction")
             ocr_span.set_attribute(STAGE_VERSION, "1.0.0")
             ocr_span.set_attribute(INPUT_ARTIFACT_IDS, in_arts)
-            ocr_span.set_attribute(OUTPUT_ARTIFACT_IDS, out_arts)
+            ocr_span.set_attribute(OUTPUT_ARTIFACT_IDS, [])
             ocr_span.set_attribute("ocr.engine", "tesseract")
             ocr_span.set_attribute("ocr.language", "eng")
             ocr_span.set_attribute("ocr.page_count", 1)
@@ -391,8 +407,7 @@ class OCREvidenceExtractor:
 
                 ocr_span.set_attribute("ocr.confidence", avg_conf)
                 ocr_span.set_attribute("extraction.text_length", text_len)
-                ocr_span.set_attribute(STAGE_STATUS, "completed")
-                ocr_span.set_status(Status(StatusCode.OK))
+                ocr_span.set_attribute(OUTPUT_ARTIFACT_IDS, out_arts)
 
                 return DetailedOCREvidenceResult(
                     engine="tesseract",
@@ -401,11 +416,6 @@ class OCREvidenceExtractor:
                     pages=[page_evidence],
                 )
             except Exception as err:
-                ocr_span.record_exception(err)
-                ocr_span.set_status(Status(StatusCode.ERROR, str(err)))
-                ocr_span.set_attribute(STAGE_STATUS, "failed")
-                ocr_span.set_attribute("error.type", type(err).__name__)
-                ocr_span.set_attribute("error.message", str(err))
                 raise
 
     def _extract_tesseract_pdf_evidence(
@@ -416,8 +426,13 @@ class OCREvidenceExtractor:
         execution_id: Optional[str] = None,
     ) -> DetailedOCREvidenceResult:
         """Extracts word and line evidence for scanned PDFs by rendering pages and processing with Tesseract."""
-        c_id, exec_id, in_arts, out_arts = self._resolve_context(claim_id, execution_id, validated_doc.file_name)
-        with tracer.start_as_current_span("ocr_text_extraction") as ocr_span:
+        c_id, exec_id, in_arts, out_arts = self._resolve_context(claim_id, execution_id, "unknown")
+        with stage_span(
+            tracer=tracer, stage_name="ocr_text_extraction", execution_id=exec_id,
+            entity_id=str(c_id), input_artifact_ids=in_arts,
+            extra_attributes={"ocr.engine": "tesseract", "ocr.language": "eng", "ocr.page_count": inspection.total_pages},
+            safe_error_message="Tesseract PDF extraction failed.",
+        ) as ocr_span:
             ocr_span.set_attribute("claim_id", c_id)
             ocr_span.set_attribute(EXECUTION_ID, exec_id)
             ocr_span.set_attribute(EXECUTION_ENTITY_ID, str(c_id))
@@ -426,7 +441,7 @@ class OCREvidenceExtractor:
             ocr_span.set_attribute(STAGE_NAME, "ocr_text_extraction")
             ocr_span.set_attribute(STAGE_VERSION, "1.0.0")
             ocr_span.set_attribute(INPUT_ARTIFACT_IDS, in_arts)
-            ocr_span.set_attribute(OUTPUT_ARTIFACT_IDS, out_arts)
+            ocr_span.set_attribute(OUTPUT_ARTIFACT_IDS, [])
             ocr_span.set_attribute("ocr.engine", "tesseract")
             ocr_span.set_attribute("ocr.language", "eng")
             ocr_span.set_attribute("ocr.page_count", inspection.total_pages)
@@ -460,8 +475,7 @@ class OCREvidenceExtractor:
                     avg_conf = round(sum(all_conf_values) / len(all_conf_values), 2) if all_conf_values else 0.0
                     ocr_span.set_attribute("ocr.confidence", avg_conf)
                     ocr_span.set_attribute("extraction.text_length", total_text_length)
-                    ocr_span.set_attribute(STAGE_STATUS, "completed")
-                    ocr_span.set_status(Status(StatusCode.OK))
+                    ocr_span.set_attribute(OUTPUT_ARTIFACT_IDS, out_arts)
 
                     return DetailedOCREvidenceResult(
                         engine="tesseract",
@@ -472,16 +486,20 @@ class OCREvidenceExtractor:
                 finally:
                     doc.close()
             except Exception as err:
-                ocr_span.record_exception(err)
-                ocr_span.set_status(Status(StatusCode.ERROR, str(err)))
-                ocr_span.set_attribute(STAGE_STATUS, "failed")
-                ocr_span.set_attribute("error.type", type(err).__name__)
-                ocr_span.set_attribute("error.message", str(err))
                 raise
 
     def _process_image_with_tesseract(self, image: Image.Image, page_number: int) -> EvidencePage:
         """Runs Tesseract image_to_data on a PIL image and returns an EvidencePage."""
-        with tracer.start_as_current_span(f"ocr_page_{page_number}") as page_span:
+        parent_attrs = getattr(trace.get_current_span(), "attributes", {}) or {}
+        claim_id = parent_attrs.get("execution.entity_id") or "unknown"
+        execution_id = parent_attrs.get("execution.id") or "exec_unknown"
+        input_ids = parent_attrs.get(INPUT_ARTIFACT_IDS, [])
+        with stage_span(
+            tracer=tracer, stage_name="ocr_page_extraction", span_name=f"ocr_page_{page_number}",
+            execution_id=str(execution_id), entity_id=str(claim_id), input_artifact_ids=list(input_ids),
+            extra_attributes={"page_number": page_number, "extraction_method": "TESSERACT_OCR"},
+            safe_error_message="Tesseract page processing failed.",
+        ) as page_span:
             page_span.set_attribute("page_number", page_number)
             page_span.set_attribute("extraction_method", "TESSERACT_OCR")
 
@@ -491,8 +509,6 @@ class OCREvidenceExtractor:
             try:
                 data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
             except Exception as err:
-                page_span.record_exception(err)
-                page_span.set_status(Status(StatusCode.ERROR, str(err)))
                 raise DocumentProcessingError(
                     f"Tesseract OCR evidence extraction failed: {str(err)}"
                 ) from err
@@ -592,6 +608,7 @@ class OCREvidenceExtractor:
                 height=img_h,
                 raw_text=raw_text,
                 lines=lines,
+                status="TESSERACT_OCR",
             )
 
 

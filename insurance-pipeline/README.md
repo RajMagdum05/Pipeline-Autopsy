@@ -42,7 +42,7 @@ All backend pipeline logic is organized into clean, dedicated service modules un
 
 ### Option 1: Running with Docker Compose (Recommended)
 
-Starts the Insurance Pipeline API, PostgreSQL database, and Arize Phoenix trace visualizer:
+Starts the Insurance Pipeline API, PostgreSQL database, and Jaeger trace backend:
 
 ```bash
 # 1. Copy environment template
@@ -53,7 +53,10 @@ docker compose up --build
 ```
 
 - **Pipeline API & Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Phoenix Trace Viewer**: [http://localhost:6006](http://localhost:6006)
+- **Jaeger trace UI**: [http://localhost:16687](http://localhost:16687)
+- **OTLP receivers**: gRPC on `localhost:4327` and HTTP on `localhost:4328`.
+- Traces are stored in the `jaeger_data` Docker volume using Badger, with a default 30-day span TTL. Set `JAEGER_TRACE_TTL` to change it (for example, `168h` for 7 days).
+- `docker compose down` keeps the trace volume; `docker compose down -v` removes it.
 
 ### Option 2: Running Locally with Python
 

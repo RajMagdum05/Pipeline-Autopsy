@@ -5,15 +5,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.claims import router as claims_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
-from app.telemetry import init_telemetry
+from app.telemetry import init_telemetry, shutdown_telemetry
 from app.database import engine, init_db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize database tables
-    init_db()
-    yield
+    try:
+        # Initialize database tables
+        init_db()
+        yield
+    finally:
+        # Drain the batch span processor before a graceful application shutdown.
+        shutdown_telemetry()
 
 
 app = FastAPI(

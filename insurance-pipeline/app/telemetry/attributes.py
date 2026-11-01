@@ -23,6 +23,10 @@ ERROR_TYPE = "error.type"
 ERROR_MESSAGE = "error.message"
 VALIDATION_RULE_ID = "validation.rule_id"
 VALIDATION_RESULT = "validation.result"
+VALIDATION_STATUS = "validation.status"
+DECISION_RESULT = "decision.result"
+DOCUMENTS_TOTAL_COUNT = "documents.total_count"
+CLAIM_AMOUNT = "claim.amount"
 
 # Retry and Error Attributes
 RETRY_COUNT = "retry.count"

@@ -10,14 +10,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from app.database import Base
 from app.models import Claim, Document
 from app.services.ocr import process_document, DocumentNotFoundError, DocumentProcessingError
-from app.telemetry import init_telemetry
 
 
 def is_tesseract_installed() -> bool:
@@ -26,15 +22,6 @@ def is_tesseract_installed() -> bool:
         return True
     except Exception:
         return False
-
-
-@pytest.fixture
-def telemetry_setup():
-    """Fixture to configure OpenTelemetry with an InMemorySpanExporter for testing."""
-    exporter = InMemorySpanExporter()
-    provider = init_telemetry(service_name="enterprise-ocr-service-test", exporter=exporter)
-    yield exporter, provider
-    exporter.clear()
 
 
 @pytest.fixture
@@ -74,8 +61,8 @@ def create_test_image(path: Path, text: str) -> Path:
     return path
 
 
-def test_tracing_case_a_digital_pdf_pymupdf(telemetry_setup, temp_workspace):
-    exporter, provider = telemetry_setup
+def test_tracing_case_a_digital_pdf_pymupdf(in_memory_telemetry, temp_workspace):
+    exporter = in_memory_telemetry
     tmp_path, db = temp_workspace
 
     pdf_path = tmp_path / "digital_claim.pdf"
@@ -112,9 +99,19 @@ def test_tracing_case_a_digital_pdf_pymupdf(telemetry_setup, temp_workspace):
     assert root_span.attributes["document_id"] == 501
     assert root_span.attributes["claim_id"] == 10
     assert root_span.attributes["ocr.engine"] == "pymupdf"
-    assert root_span.attributes["file_name"] == "digital_claim.pdf"
     assert root_span.attributes["file_type"] == ".pdf"
     assert root_span.attributes["processing_status"] == "success"
+
+    required = (
+        "pipeline.name", "pipeline.version", "execution.id", "execution.entity_id",
+        "stage.name", "stage.status", "input.artifact_ids", "output.artifact_ids",
+    )
+    for span in spans:
+        for key in required:
+            assert key in span.attributes, f"{span.name} is missing {key}"
+        assert span.attributes["stage.status"] == "success"
+        assert span.attributes["pipeline.name"] == "insurance-pipeline"
+        assert span.attributes["pipeline.version"] == "1.0.0"
 
     # 3. Verify trace_id consistency across child spans
     trace_id = root_span.context.trace_id
@@ -129,8 +126,8 @@ def test_tracing_case_a_digital_pdf_pymupdf(telemetry_setup, temp_workspace):
                 assert "MEDICAL INVOICE" not in attr_val
 
 
-def test_tracing_case_b_image_tesseract(telemetry_setup, temp_workspace):
-    exporter, provider = telemetry_setup
+def test_tracing_case_b_image_tesseract(in_memory_telemetry, temp_workspace):
+    exporter = in_memory_telemetry
     tmp_path, db = temp_workspace
 
     png_path = tmp_path / "scanned_invoice.png"
@@ -176,8 +173,8 @@ def test_tracing_case_b_image_tesseract(telemetry_setup, temp_workspace):
     assert root_span.attributes["file_type"] == ".png"
 
 
-def test_tracing_error_span_recording(telemetry_setup, temp_workspace):
-    exporter, provider = telemetry_setup
+def test_tracing_error_span_recording(in_memory_telemetry, temp_workspace):
+    exporter = in_memory_telemetry
     _, db = temp_workspace
 
     with pytest.raises(DocumentNotFoundError):
@@ -188,3 +185,7 @@ def test_tracing_error_span_recording(telemetry_setup, temp_workspace):
 
     root_span = [s for s in spans if s.name == "ocr.process_document"][0]
     assert root_span.status.status_code == trace.StatusCode.ERROR
+    assert root_span.attributes["stage.status"] == "failed"
+    assert root_span.attributes["error.type"] == "DocumentNotFoundError"
+    assert root_span.attributes["error.message"] == "OCR document processing failed."
+    assert list(root_span.attributes["input.artifact_ids"]) == ["doc_999"]

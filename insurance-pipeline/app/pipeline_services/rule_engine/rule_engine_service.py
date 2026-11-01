@@ -11,7 +11,8 @@ from app.schemas import (
 )
 
 from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
+from app.telemetry.span_helpers import stage_span
+from app.telemetry.attributes import OUTPUT_ARTIFACT_IDS
 
 tracer = trace.get_tracer("enterprise_pipeline.rule_engine")
 
@@ -51,7 +52,27 @@ def evaluate_claim_rules(
     Raises:
         RuleEngineInputError: If extraction_input is unvalidated or failed.
     """
-    with tracer.start_as_current_span("rule_engine") as span:
+    if isinstance(extraction_input, dict):
+        stage_claim_id = extraction_input.get("claim_id")
+        stage_execution_id = extraction_input.get("execution_id")
+    else:
+        stage_claim_id = getattr(extraction_input, "claim_id", None)
+        stage_execution_id = getattr(extraction_input, "execution_id", None)
+
+    claim_key = str(stage_claim_id) if stage_claim_id is not None else "unknown"
+    execution_key = str(stage_execution_id) if stage_execution_id else "exec_unknown"
+    input_artifact_ids = (
+        [f"art_entities_claim_{stage_claim_id}"] if stage_claim_id is not None else []
+    )
+
+    with stage_span(
+        tracer=tracer,
+        stage_name="rule_engine",
+        execution_id=execution_key,
+        entity_id=claim_key,
+        input_artifact_ids=input_artifact_ids,
+        safe_error_message="Rule engine evaluation failed.",
+    ) as span:
         try:
             # 1. Input Gatekeeping Check
             if isinstance(extraction_input, ValidatedExtractionResult):
@@ -60,8 +81,6 @@ def evaluate_claim_rules(
                         f"Cannot evaluate extraction input with status '{extraction_input.extraction_status}'. "
                         "Rule Engine requires extraction_status == 'VALIDATED'."
                     )
-                    span.record_exception(err)
-                    span.set_status(Status(StatusCode.ERROR, str(err)))
                     raise err
                 data = extraction_input.model_dump()
                 claim_id = extraction_input.claim_id
@@ -73,16 +92,12 @@ def evaluate_claim_rules(
             elif isinstance(extraction_input, dict):
                 if extraction_input.get("extraction_status") == "FAILED" or extraction_input.get("ready_for_rule_engine") is False:
                     err = RuleEngineInputError("Cannot evaluate failed extraction input payload.")
-                    span.record_exception(err)
-                    span.set_status(Status(StatusCode.ERROR, str(err)))
                     raise err
                 data = extraction_input
                 claim_id = data.get("claim_id", 1)
                 execution_id = data.get("execution_id", "exec_dict_001")
             else:
                 err = RuleEngineInputError(f"Unsupported extraction input type: {type(extraction_input)}")
-                span.record_exception(err)
-                span.set_status(Status(StatusCode.ERROR, str(err)))
                 raise err
 
             span.set_attribute("claim_id", claim_id)
@@ -331,7 +346,7 @@ def evaluate_claim_rules(
             span.set_attribute("rules.failed_count", failed_count)
             span.set_attribute("rules.missing_count", missing_count)
             span.set_attribute("rules.overall_decision", decision)
-            span.set_status(Status(StatusCode.OK))
+            span.set_attribute(OUTPUT_ARTIFACT_IDS, [f"art_decision_claim_{claim_id}"])
 
             # -------------------------------------------------------------------------
             # Database Persistence
@@ -344,10 +359,7 @@ def evaluate_claim_rules(
 
             return decision_obj
 
-        except Exception as exc:
-            if not isinstance(exc, RuleEngineInputError):
-                span.record_exception(exc)
-                span.set_status(Status(StatusCode.ERROR, str(exc)))
+        except Exception:
             raise
 
 

@@ -28,6 +28,7 @@ def stage_span(
     stage_name: str,
     execution_id: str,
     entity_id: str,
+    span_name: Optional[str] = None,
     input_artifact_ids: Optional[List[str]] = None,
     extra_attributes: Optional[Dict[str, Union[str, int, float, bool, List[str]]]] = None,
     pipeline_name: str = DEFAULT_PIPELINE_NAME,
@@ -35,12 +36,13 @@ def stage_span(
     stage_version: str = "1.0.0",
     retry_count: Optional[int] = None,
     retry_reason: Optional[str] = None,
+    safe_error_message: Optional[str] = None,
 ):
     """
     Context manager that wraps stage execution in an OpenTelemetry span
     with all required contract attributes set according to TRACE_CONTRACT.md.
     """
-    with tracer.start_as_current_span(stage_name) as span:
+    with tracer.start_as_current_span(span_name or stage_name) as span:
         # Set Universal Contract Attributes
         span.set_attribute(PIPELINE_NAME, pipeline_name)
         span.set_attribute(PIPELINE_VERSION, pipeline_version)
@@ -66,12 +68,26 @@ def stage_span(
         try:
             yield span
             # If no exception occurred, mark stage status as success
-            span.set_attribute(STAGE_STATUS, "success")
-            span.set_status(Status(StatusCode.OK))
+            # Respect explicit stage outcomes set by validators and decision gates.
+            if span.attributes.get(STAGE_STATUS) == "running":
+                span.set_attribute(STAGE_STATUS, "success")
+            if span.status.status_code != StatusCode.ERROR:
+                span.set_status(Status(StatusCode.OK))
         except Exception as exc:
+            error_message = safe_error_message or str(exc) or type(exc).__name__
             span.set_attribute(STAGE_STATUS, "failed")
             span.set_attribute(ERROR_TYPE, type(exc).__name__)
-            span.set_attribute(ERROR_MESSAGE, str(exc))
-            span.set_status(Status(StatusCode.ERROR, description=str(exc)))
-            span.record_exception(exc)
+            span.set_attribute(ERROR_MESSAGE, error_message)
+            span.set_status(Status(StatusCode.ERROR, description=error_message))
+            if safe_error_message is not None:
+                span.add_event(
+                    "exception",
+                    {
+                        "exception.type": type(exc).__name__,
+                        "exception.message": error_message,
+                        "exception.escaped": True,
+                    },
+                )
+            else:
+                span.record_exception(exc)
             raise

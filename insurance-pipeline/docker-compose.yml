@@ -8,13 +8,13 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-pipeline}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-insurance_pipeline}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4318/v1/traces
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318/v1/traces
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
-      phoenix:
-        condition: service_started
+      jaeger-ready:
+        condition: service_completed_successfully
     volumes:
       - ./storage:/app/storage
     restart: unless-stopped
@@ -23,7 +23,7 @@ services:
     image: pgvector/pgvector:pg16
     container_name: insurance-pipeline-db
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-insurance_pipeline}
       POSTGRES_USER: ${POSTGRES_USER:-pipeline}
@@ -38,14 +38,39 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  phoenix:
-    image: arizephoenix/phoenix:latest
-    container_name: insurance-pipeline-phoenix
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.22.0
+    container_name: insurance-pipeline-jaeger
+    command: ["--config", "/etc/jaeger/config.yml"]
+    environment:
+      JAEGER_TRACE_TTL: ${JAEGER_TRACE_TTL:-720h}
     ports:
-      - "6006:6006" # Phoenix Web UI
-      - "4317:4317" # OTLP gRPC receiver
-      - "4318:4318" # OTLP HTTP receiver
+      - "16687:16686" # Jaeger UI (avoids the Autopsy stack on host port 16686)
+      - "4327:4317" # OTLP gRPC receiver
+      - "4328:4318" # OTLP HTTP receiver
+    volumes:
+      - ./jaeger-config.yml:/etc/jaeger/config.yml:ro
+      - jaeger_data:/var/lib/jaeger
+    depends_on:
+      jaeger-init:
+        condition: service_completed_successfully
     restart: unless-stopped
+
+  jaeger-init:
+    image: busybox:1.37
+    command: ["sh", "-c", "mkdir -p /var/lib/jaeger/keys /var/lib/jaeger/values && chown -R 10001:10001 /var/lib/jaeger"]
+    volumes:
+      - jaeger_data:/var/lib/jaeger
+    restart: "no"
+
+  jaeger-ready:
+    image: busybox:1.37
+    command: ["sh", "-c", "until wget -q -O /dev/null http://jaeger:16686/; do sleep 1; done"]
+    depends_on:
+      jaeger:
+        condition: service_started
+    restart: "no"
 
 volumes:
   postgres_data:
+  jaeger_data:

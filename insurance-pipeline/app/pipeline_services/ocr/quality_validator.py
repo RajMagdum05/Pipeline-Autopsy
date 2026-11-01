@@ -2,6 +2,16 @@ from typing import List, Union, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
+from app.telemetry.attributes import (
+    EXECUTION_ENTITY_ID,
+    EXECUTION_ID,
+    ERROR_MESSAGE,
+    ERROR_TYPE,
+    INPUT_ARTIFACT_IDS,
+    OUTPUT_ARTIFACT_IDS,
+    STAGE_STATUS,
+)
+from app.telemetry.span_helpers import stage_span
 
 tracer = trace.get_tracer("enterprise_pipeline.ocr_validation")
 
@@ -156,7 +166,10 @@ class OCRQualityValidator:
         )
 
     def validate_document(
-        self, ocr_result: Union[OCRResult, Dict[str, Any]]
+        self,
+        ocr_result: Union[OCRResult, Dict[str, Any]],
+        claim_id: Optional[Union[int, str]] = None,
+        execution_id: Optional[str] = None,
     ) -> OCRDocumentValidationResult:
         """
         Validates quality of an entire document OCRResult across all pages.
@@ -172,7 +185,20 @@ class OCRQualityValidator:
         else:
             res_obj = ocr_result
 
-        with tracer.start_as_current_span("ocr_validation") as span:
+        parent_attrs = getattr(trace.get_current_span(), "attributes", {}) or {}
+        resolved_claim_id = claim_id or parent_attrs.get(EXECUTION_ENTITY_ID) or "unknown"
+        resolved_execution_id = execution_id or parent_attrs.get(EXECUTION_ID) or "exec_unknown"
+        doc_artifact_ids = [f"art_ocr_{res_obj.document_id}"] if res_obj.document_id is not None else []
+        with stage_span(
+            tracer=tracer,
+            stage_name="ocr_validation",
+            span_name="ocr_validation.document",
+            execution_id=resolved_execution_id,
+            entity_id=str(resolved_claim_id),
+            input_artifact_ids=doc_artifact_ids,
+            extra_attributes={"document_id": res_obj.document_id} if res_obj.document_id is not None else None,
+            safe_error_message="OCR document validation failed.",
+        ) as span:
             if res_obj.document_id is not None:
                 span.set_attribute("document_id", res_obj.document_id)
 
@@ -213,13 +239,18 @@ class OCRQualityValidator:
             span.set_attribute("validation.passed_pages_count", pass_count)
             span.set_attribute("validation.warning_pages_count", warn_count)
             span.set_attribute("validation.failed_pages_count", fail_count)
+            span.set_attribute(
+                OUTPUT_ARTIFACT_IDS,
+                [f"art_ocr_val_{res_obj.document_id}"] if res_obj.document_id is not None else [],
+            )
             if avg_doc_conf is not None:
                 span.set_attribute("validation.avg_confidence", avg_doc_conf)
 
             if overall_status == "FAIL":
-                span.set_status(Status(StatusCode.ERROR, f"OCR Quality Validation FAILED ({fail_count} failed page(s))"))
-            else:
-                span.set_status(Status(StatusCode.OK))
+                span.set_attribute(STAGE_STATUS, "failed")
+                span.set_attribute(ERROR_TYPE, "OCRQualityValidationError")
+                span.set_attribute(ERROR_MESSAGE, "OCR quality validation failed.")
+                span.set_status(Status(StatusCode.ERROR, "OCR quality validation failed."))
 
             return OCRDocumentValidationResult(
                 document_id=res_obj.document_id,

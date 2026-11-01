@@ -15,7 +15,6 @@ COPY . /app
 
 ENV PYTHONPATH=/app
 ENV DATABASE_URL=sqlite:////app/storage/insurance_claims.db
-ENV OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
 
 EXPOSE 8000
 

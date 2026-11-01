@@ -123,7 +123,7 @@ class PDFInspector:
             curr_claim_id = curr_claim_id or (document_id or 1)
             curr_exec_id = curr_exec_id or f"EXEC-{uuid.uuid4().hex[:12].upper()}"
 
-            doc_ref = str(document_id) if document_id else "unknown_doc"
+            doc_ref = str(document_id) if document_id is not None else "unknown"
             input_artifacts = [f"doc_{doc_ref}"]
             output_artifacts = [f"art_verification_{doc_ref}"]
 
@@ -149,7 +149,7 @@ class PDFInspector:
                         f"Expected ValidatedDocument, str, or Path."
                     )
 
-                doc_ref = str(document_id or validated_doc.file_name)
+                doc_ref = str(document_id) if document_id is not None else "unknown"
                 input_artifacts = [f"doc_{doc_ref}"]
                 output_artifacts = [f"art_verification_{doc_ref}"]
                 span.set_attribute(INPUT_ARTIFACT_IDS, input_artifacts)
@@ -257,9 +257,18 @@ class PDFInspector:
             except Exception as e:
                 span.set_attribute(STAGE_STATUS, "failed")
                 span.set_attribute(ERROR_TYPE, type(e).__name__)
-                span.set_attribute(ERROR_MESSAGE, str(e))
-                span.set_status(Status(StatusCode.ERROR, str(e)))
-                span.record_exception(e)
+                safe_message = "PDF verification failed."
+                span.set_attribute(ERROR_MESSAGE, safe_message)
+                span.set_attribute(OUTPUT_ARTIFACT_IDS, [])
+                span.set_status(Status(StatusCode.ERROR, safe_message))
+                span.add_event(
+                    "exception",
+                    {
+                        "exception.type": type(e).__name__,
+                        "exception.message": safe_message,
+                        "exception.escaped": True,
+                    },
+                )
                 raise
 
 
