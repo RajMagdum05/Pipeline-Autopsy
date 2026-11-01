@@ -34,9 +34,9 @@ This repository contains two completely independent, decoupled projects connecte
 
 ## ⚡ Quick Navigation
 
-| Project | Port | Docs / UI | Command |
-|:---|:---|:---|:---|
-| **Insurance Pipeline** | `8000` | [http://localhost:8000/docs](http://localhost:8000/docs) | `cd insurance-pipeline && docker compose up` |
-| **Jaeger Trace UI** | `16687` | [http://localhost:16687](http://localhost:16687) | Included in `insurance-pipeline/docker-compose.yml` |
-| **Pipeline Autopsy Engine** | `8080` | [http://localhost:8080/docs](http://localhost:8080/docs) | `cd pipeline-autopsy && docker compose up` |
-| **Autopsy Website** | `3000` | [http://localhost:3000](http://localhost:3000) | Included in `pipeline-autopsy/docker-compose.yml` |
+| Project | Command |
+|:---|:---|
+| **Insurance Pipeline** | `cd insurance-pipeline && docker compose up` |
+| **Jaeger Trace UI** | Included in `insurance-pipeline/docker-compose.yml` |
+| **Pipeline Autopsy Engine** | `cd pipeline-autopsy && docker compose up` |
+| **Autopsy Website** | Included in `pipeline-autopsy/docker-compose.yml` |
