@@ -1,0 +1,16 @@
+{
+  "id": "art_3cd841ea26efaa2b",
+  "execution_id": "toy_short_body",
+  "pipeline": "toy-summarizer",
+  "version": "0.1.0",
+  "stage": "publish",
+  "item_id": null,
+  "kind": "post",
+  "content_type": "application/json",
+  "content": {
+    "published": true,
+    "summary": "Summary: too short"
+  },
+  "redacted": false,
+  "redaction": null
+}

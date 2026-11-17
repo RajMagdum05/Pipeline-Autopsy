@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autopsy-sdk"
+version = "2.0.0"
+description = "A thin OpenTelemetry semantic layer for Pipeline Autopsy"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["opentelemetry-api>=1.25"]
+
+[project.optional-dependencies]
+configure = [
+  "opentelemetry-sdk>=1.25",
+  "opentelemetry-exporter-otlp-proto-http>=1.25",
+]
+upload = ["httpx>=0.27"]
+cli = ["httpx>=0.27", "PyYAML>=6,<7"]
+dev = [
+  "pytest>=8",
+  "opentelemetry-sdk>=1.25",
+  "opentelemetry-exporter-otlp-proto-http>=1.25",
+  "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+include = ["autopsy_sdk*"]
+
+[project.scripts]
+autopsy = "autopsy_sdk.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,15 @@
+{
+  "id": "art_566cd01de08350d6",
+  "execution_id": "toy_publish_timeout",
+  "pipeline": "toy-summarizer",
+  "version": "0.1.0",
+  "stage": "summarize",
+  "item_id": null,
+  "kind": "summary",
+  "content_type": "application/json",
+  "content": {
+    "text": "Summary: A compact example body with useful detail."
+  },
+  "redacted": false,
+  "redaction": null
+}

@@ -1,3 +1,1 @@
-from autopsy.api.routes import router
-
-__all__ = ["router"]
+"""HTTP API routers and authentication dependencies."""

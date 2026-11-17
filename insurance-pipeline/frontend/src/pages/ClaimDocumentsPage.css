@@ -1,0 +1,61 @@
+.claim-result {
+  padding: 22px 24px;
+  margin: 0 0 22px;
+  border-left: 4px solid #7d9995;
+}
+
+.claim-result--approved { border-left-color: #329064; }
+.claim-result--rejected { border-left-color: #c45d52; }
+.claim-result--manual_review { border-left-color: #c39235; }
+
+.claim-result__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.claim-result__heading h2 {
+  margin: 0;
+  color: #213033;
+  font-family: Manrope, sans-serif;
+  font-size: 20px;
+}
+
+.claim-result__message {
+  margin: 12px 0;
+  color: #60716f;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.claim-result__amount {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 16px 0 4px;
+  color: #506260;
+  font-size: 12px;
+}
+
+.claim-result__amount strong {
+  color: #1d3834;
+  font-family: Manrope, sans-serif;
+  font-size: 20px;
+}
+
+.claim-result__reasons {
+  margin-top: 17px;
+  padding-top: 15px;
+  border-top: 1px solid #edf1f0;
+}
+
+.claim-result__reasons h3 { margin: 0 0 10px; font-size: 12px; }
+.claim-result__reasons ul { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.claim-result__reasons li { display: grid; gap: 3px; color: #526260; font-size: 12px; line-height: 1.45; }
+.claim-result__rule { color: #778986; font-family: ui-monospace, Consolas, monospace; font-size: 10px; }
+
+@media (max-width: 640px) {
+  .claim-result { padding: 17px; }
+  .claim-result__heading { flex-direction: column; }
+}

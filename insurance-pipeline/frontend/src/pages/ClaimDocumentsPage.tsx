@@ -4,6 +4,7 @@ import { PROOF_DOCUMENT_TYPES } from '../types/claim'
 import { Alert } from '../components/ui/Alert'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import './ClaimDocumentsPage.css'
 
 const TYPES = ['policy_document', ...PROOF_DOCUMENT_TYPES.map((label) => label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''))]
 type DocumentStatus = {
@@ -21,6 +22,17 @@ type DocumentStatus = {
   version_number: number
 }
 type StatusResponse = { claim_id: string; documents: DocumentStatus[] }
+type ResultReason = { rule_id: string; result: 'fail' | 'not_evaluable'; message: string }
+type ClaimResult = {
+  claim_id: string
+  run_id: string
+  decision: 'APPROVED' | 'REJECTED' | 'MANUAL_REVIEW'
+  claim_status: 'APPROVED' | 'REJECTED' | 'MANUAL_REVIEW'
+  payable_amount: string | null
+  message_code: string
+  message: string
+  reasons: ResultReason[]
+}
 
 const LABELS: Record<string, string> = {
   waiting_for_text_processing: 'Waiting for text processing',
@@ -46,6 +58,8 @@ export function ClaimDocumentsPage() {
   const [data, setData] = useState<StatusResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [claimResult, setClaimResult] = useState<ClaimResult | null>(null)
+  const [runStatus, setRunStatus] = useState<string | null>(null)
   const [files, setFiles] = useState<Record<string, File | undefined>>({})
   const [types, setTypes] = useState<Record<string, string>>({})
   const token = accessToken(claimId)
@@ -56,6 +70,9 @@ export function ClaimDocumentsPage() {
     const body = await response.json()
     if (!response.ok) throw new Error(typeof body?.detail === 'string' ? body.detail : 'Document statuses could not be loaded.')
     setData(body)
+    const resultResponse = await fetch(`/legacy-api/${claimId}/result`, { headers: { Authorization: `Bearer ${token}` } })
+    if (resultResponse.status === 409) setClaimResult(null)
+    else if (resultResponse.ok) setClaimResult(await resultResponse.json())
     setError(null)
   }, [claimId, token])
 
@@ -66,18 +83,19 @@ export function ClaimDocumentsPage() {
     return () => window.clearInterval(timer)
   }, [busy, load])
 
-  async function processDocuments() {
+  async function processClaim() {
     if (!token) return
     setBusy(true); setError(null)
     try {
-      const response = await fetch(`/api/v1/claims/${claimId}/documents/process`, {
+      const response = await fetch(`/legacy-api/${claimId}/process`, {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config_version: 'document-extraction-v2' }),
+        body: JSON.stringify({ config_version: 'claim-run-v1' }),
       })
       const body = await response.json()
-      if (!response.ok) throw new Error(typeof body?.detail === 'string' ? body.detail : 'Document processing failed.')
+      if (!response.ok) throw new Error(typeof body?.detail === 'string' ? body.detail : 'Claim processing failed.')
+      setRunStatus(body.status || null)
       await load()
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Document processing failed.') }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Claim processing failed.') }
     finally { setBusy(false) }
   }
 
@@ -107,7 +125,15 @@ export function ClaimDocumentsPage() {
       <section className="page-heading"><div><p className="eyebrow">CLAIM DOCUMENTS</p><h1>Document extraction</h1><p className="page-description">Each document is classified, then its own text is extracted and validated. Unsupported or uncertain output is not shown as accepted information.</p></div></section>
       {error && <Alert tone="error">{error}</Alert>}
       {data && <>
-        <div className="document-actions"><p className="page-description">Claim {data.claim_id}</p><Button type="button" disabled={busy} onClick={processDocuments}>{busy ? 'Processing documents…' : 'Process documents'}</Button></div>
+        <div className="document-actions"><p className="page-description">Claim {data.claim_id}</p><Button type="button" disabled={busy} onClick={processClaim}>{busy ? 'Processing claim…' : 'Process claim'}</Button></div>
+        {runStatus === 'BLOCKED' && !claimResult && <Alert tone="info">The policy did not pass its acceptance checks, so adjudication was not run. Review or replace the policy document before processing again.</Alert>}
+        {claimResult && <Card className={`claim-result claim-result--${claimResult.decision.toLowerCase()}`}>
+          <div className="claim-result__heading"><div><p className="eyebrow">FINAL CLAIM RESULT</p><h2>{claimResult.decision === 'MANUAL_REVIEW' ? 'Manual review' : claimResult.decision}</h2></div>
+            <span className="ocr-status">{claimResult.claim_status.replace(/_/g, ' ')}</span></div>
+          <p className="claim-result__message">{claimResult.message}</p>
+          {claimResult.payable_amount !== null && <p className="claim-result__amount"><span>Payable amount</span><strong>{claimResult.payable_amount}</strong></p>}
+          {claimResult.reasons.length > 0 && <section className="claim-result__reasons"><h3>Rule outcomes</h3><ul>{claimResult.reasons.map((reason, index) => <li key={`${reason.rule_id}-${index}`}><span className="claim-result__rule">{reason.rule_id}</span><span>{reason.message}</span></li>)}</ul></section>}
+        </Card>}
         {(['policy_document', 'supporting'] as const).map((group) => <section key={group} className="extraction-section"><h2>{group === 'policy_document' ? 'Policy document' : 'Supporting documents'}</h2><div className="document-status-list">{data.documents.filter((doc) => group === 'policy_document' ? doc.declared_type === 'policy_document' : doc.declared_type !== 'policy_document').map((doc) => <Card key={doc.document_id} className="document-status-card">
           <div className="document-status-card__heading"><div><p className="eyebrow">DOCUMENT {doc.document_id.slice(0, 8)}</p><h2>{doc.declared_type.replace(/_/g, ' ')}</h2></div><span className={`ocr-status ocr-status--${doc.status}`}>{LABELS[doc.status] || LABELS.waiting_for_text_processing}</span></div>
           {doc.detected_type && <p className="ocr-meta">Detected: <strong>{doc.detected_type.replace(/_/g, ' ')}</strong>{doc.detected_subtype ? ` · ${doc.detected_subtype.replace(/_/g, ' ')}` : ''} · Version {doc.version_number}</p>}

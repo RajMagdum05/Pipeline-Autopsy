@@ -38,18 +38,56 @@ jobs:
         working-directory: pipeline-autopsy
     env:
       AUTOPSY_DATABASE_URL: sqlite:///./ci.db
-      PYTHONPATH: packages/autopsy-sdk
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: pipeline-autopsy/requirements.txt
+          cache-dependency-path: |
+            pipeline-autopsy/requirements.txt
+            autopsy-sdk/pyproject.toml
       - name: Install dependencies
         run: python -m pip install -r requirements.txt pytest
-      - name: Run Autopsy and SDK tests
-        run: python -m pytest -p no:cacheprovider tests packages/autopsy-sdk/tests -q
+      - name: Install and test autopsy-sdk
+        working-directory: ${{ github.workspace }}/autopsy-sdk
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m pytest -q
+      - name: Run Autopsy tests
+        run: python -m pytest -p no:cacheprovider tests -q
+      - name: Run recorded L1 cases
+        run: python evals/run_l1.py
+
+  autopsy-ui:
+    name: Autopsy UI and browser tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipeline-autopsy/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: pipeline-autopsy/ui/package-lock.json
+      - name: Install backend dependencies
+        working-directory: pipeline-autopsy
+        run: python -m pip install -r requirements.txt
+      - name: Install UI dependencies
+        run: npm ci
+      - name: Build UI
+        run: npm run build
+      - name: Run UI unit tests
+        run: npm test -- --reporter=dot
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      - name: Run browser tests
+        run: npm run test:e2e
 
   insurance-frontend:
     name: Insurance frontend

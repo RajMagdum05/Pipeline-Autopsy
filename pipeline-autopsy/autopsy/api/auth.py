@@ -73,7 +73,7 @@ def verify_api_key(
     or configured environment fallback keys.
     Attaches authenticated project_id to request.state.
     """
-    require_auth = os.getenv("AUTOPSY_REQUIRE_API_KEY", "false").lower() in ("true", "1", "yes")
+    require_auth = os.getenv("AUTOPSY_REQUIRE_API_KEY", "true").strip().lower() in ("true", "1", "yes")
     api_key = extract_api_key(request)
 
     if not api_key:

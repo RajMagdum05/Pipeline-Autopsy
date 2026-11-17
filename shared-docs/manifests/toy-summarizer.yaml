@@ -1,0 +1,11 @@
+manifest: pipeline-manifest/1
+pipeline: toy-summarizer
+version: 0.1.0
+evidence: {level: E2, kinds_allowed: [page, summary], retention_days: 7}
+external_inputs: [raw]
+stages:
+  - {name: fetch,     scope: run, consumes: [raw],     produces: [page]}
+  - {name: summarize, scope: run, consumes: [page],    produces: [summary]}
+  - {name: publish,   scope: run, consumes: [summary], produces: [post]}
+artifacts:
+  page: {schema: {type: object, required: [title, body], properties: {body: {type: string, minLength: 20}}}}

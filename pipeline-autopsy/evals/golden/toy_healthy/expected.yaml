@@ -1,0 +1,6 @@
+# Draft expectations for the A2.7 review before commit.
+verdict: NO_ISSUE_DETECTED
+trace_grade: A
+origins: []
+findings: {}
+required_evidence_codes: []

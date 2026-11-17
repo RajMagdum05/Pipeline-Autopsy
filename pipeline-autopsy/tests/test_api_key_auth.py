@@ -59,7 +59,7 @@ def test_valid_api_key_telemetry_accepted(monkeypatch):
         headers={"X-Autopsy-Api-Key": "sk_live_valid_key_1"},
     )
     assert resp.status_code == 200, f"Valid key failed: {resp.text}"
-    assert resp.json().get("status") == "success"
+    assert resp.json() == {}
 
 
 def test_invalid_api_key_telemetry_rejected(monkeypatch):

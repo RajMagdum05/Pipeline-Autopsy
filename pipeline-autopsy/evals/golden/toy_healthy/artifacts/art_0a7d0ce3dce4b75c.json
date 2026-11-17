@@ -1,0 +1,16 @@
+{
+  "id": "art_0a7d0ce3dce4b75c",
+  "execution_id": "toy_healthy",
+  "pipeline": "toy-summarizer",
+  "version": "0.1.0",
+  "stage": "fetch",
+  "item_id": null,
+  "kind": "page",
+  "content_type": "application/json",
+  "content": {
+    "title": "Example",
+    "body": "A compact example body with useful detail."
+  },
+  "redacted": false,
+  "redaction": null
+}
