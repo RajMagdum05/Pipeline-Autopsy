@@ -32,31 +32,33 @@ class EvidenceUploader:
         self._thread = threading.Thread(target=self._work, name="autopsy-evidence-upload", daemon=True)
         self._thread.start()
 
-    def enqueue(self, kind, content, metadata, excerpt_values=None):
+    def enqueue(self, kind, content, metadata, excerpt_values=None, redaction=None):
         if self._closed.is_set() or kind not in self.allowed:
             return False
         try:
-            self.queue.put_nowait((kind, content, dict(metadata), excerpt_values))
+            self.queue.put_nowait((kind, content, dict(metadata), excerpt_values, redaction))
             return True
         except queue.Full:
             logger.warning("Autopsy evidence queue full; dropping artifact %s", metadata.get("id", "unknown"))
             return False
 
-    def _payload(self, kind, content, metadata, values):
+    def _payload(self, kind, content, metadata, values, redaction=None):
         is_excerpt = kind == "page_text" or values is not None
         if is_excerpt:
             text = excerpt(content, values)
             return {**metadata, "kind": kind, "content_type": "text/plain", "content": text,
                     "redacted": True, "redaction": "excerpt"}
+        redacted = redaction is not None
+        redaction_name = redaction
         if isinstance(content, bytes):
             return {**metadata, "kind": kind, "content_type": "application/octet-stream",
                     "content_b64": base64.b64encode(content).decode("ascii"),
-                    "redacted": False, "redaction": None}
+                    "redacted": redacted, "redaction": redaction_name}
         if isinstance(content, str):
             return {**metadata, "kind": kind, "content_type": "text/plain", "content": content,
-                    "redacted": False, "redaction": None}
+                    "redacted": redacted, "redaction": redaction_name}
         return {**metadata, "kind": kind, "content_type": "application/json", "content": content,
-                "redacted": False, "redaction": None}
+                "redacted": redacted, "redaction": redaction_name}
 
     def _post(self, payload):
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
@@ -64,8 +66,8 @@ class EvidenceUploader:
         response.raise_for_status()
 
     def _send(self, job):
-        kind, content, metadata, values = job
-        payload = self._payload(kind, content, metadata, values)
+        kind, content, metadata, values, redaction = job
+        payload = self._payload(kind, content, metadata, values, redaction)
         for attempt in range(len(self.retry_delays) + 1):
             try:
                 self._post(payload)

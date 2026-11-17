@@ -59,7 +59,7 @@ def _make_exporter(endpoint, api_key=None):
 
 
 def configure(service_name=None, environment=None, endpoint=None, api_key=None,
-              extra_otlp_endpoint=None, evidence_kinds=None):
+              extra_otlp_endpoint=None, evidence_kinds=None, artifact_endpoint=None):
     """Attach OTLP exporting to the current provider and optionally enable E2 uploads."""
     global _UPLOADER, _OWNED_PROVIDER
     if not _enabled():
@@ -89,7 +89,8 @@ def configure(service_name=None, environment=None, endpoint=None, api_key=None,
             _CONFIGURED.add(marker)
         if os.getenv("AUTOPSY_EVIDENCE_LEVEL", "E1").strip().upper() == "E2":
             if _UPLOADER is None or not _UPLOADER._thread.is_alive():
-                _UPLOADER = EvidenceUploader(endpoint, api_key, evidence_kinds)
+                upload_endpoint = artifact_endpoint or endpoint.removesuffix("/v1/traces").rstrip("/")
+                _UPLOADER = EvidenceUploader(upload_endpoint, api_key, evidence_kinds)
                 _set_artifact_uploader(_UPLOADER)
         logger.info("Pipeline Autopsy instrumentation configured for %s", service_name)
         return provider

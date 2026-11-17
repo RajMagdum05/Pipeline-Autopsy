@@ -3,7 +3,10 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import os
 from pathlib import Path
+from uuid import UUID
 
+import autopsy_sdk as autopsy
+from app import faults
 from PIL import Image
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -151,11 +154,17 @@ class ClaimDocumentProcessingService:
                 requested = os.getenv("TESSERACT_LANGUAGE", "eng").split("+")
                 missing = [language for language in requested if language not in languages]
                 if missing:
-                    raise DocumentProcessingError(f"Required Tesseract language data is unavailable: {', '.join(missing)}.")
+                    raise DocumentProcessingError(
+                        "Required Tesseract language data is unavailable.",
+                        error_class="infra", code="OCR_RUNTIME_UNAVAILABLE",
+                    )
             except DocumentProcessingError:
                 raise
             except Exception as exc:
-                raise DocumentProcessingError("Tesseract OCR executable or language data is unavailable.") from exc
+                raise DocumentProcessingError(
+                    "Tesseract OCR executable or language data is unavailable.",
+                    error_class="infra", code="OCR_RUNTIME_UNAVAILABLE",
+                ) from exc
 
     def _record_blocked_proofs(self, db, run, claim_id, proofs, failed_ids, config_version):
         for stored, intake_doc, _, role in proofs:
@@ -260,7 +269,8 @@ class ClaimDocumentProcessingService:
         processed.completed_at = _now()
         return disposition, retries
 
-    def process_claim(self, db: Session, claim_id: str, config_version: str = "intake-v1") -> ProcessClaimResponse:
+    def process_claim(self, db: Session, claim_id: str, config_version: str = "intake-v1",
+                      run_id: UUID | None = None) -> ProcessClaimResponse:
         # Reuse only runs produced under the same extraction and validator semantics.
         config_version = f"{config_version}|model={self.content_service.model}|{EXTRACTION_PROMPT_VERSION}|{EXTRACTION_VALIDATOR_VERSION}|{GEMINI_SCHEMA_ADAPTER_VERSION}"
         if db.query(IntakeClaim.id).filter_by(claim_id=claim_id).first() is None:
@@ -288,7 +298,8 @@ class ClaimDocumentProcessingService:
                     policy_document_id=next((str(row.intake_document_id) for row in latest.values() if row.role == "policy_document"), None),
                     proof_document_ids=[str(doc_id) for doc_id, row in latest.items() if row.role != "policy_document" and row.status == "COMPLETED"],
                     failed_document_ids=[str(doc_id) for doc_id, row in latest.items() if row.status != "COMPLETED"], error=previous.error)
-        run = ProcessingRun(claim_id=claim_id, config_version=config_version, status="RUNNING", started_at=_now())
+        run = ProcessingRun(id=run_id, claim_id=claim_id, config_version=config_version,
+                            status="RUNNING", started_at=_now())
         db.add(run)
         try:
             db.commit()
@@ -314,50 +325,120 @@ class ClaimDocumentProcessingService:
             stored, intake_doc, _, role = item
             final_disposition = "FAILED"
             try:
-                digest, validated = self._validate_file(item)
-                self._check_ocr(validated)
                 max_attempts = max(1, min(int(os.getenv("OCR_MAX_ATTEMPTS", "2")), 2))
                 retry_pages = []
                 for attempt_number in range(1, max_attempts + 1):
-                    attempt_config = {
-                        "config_version": config_version,
-                        "quality_gate_version": QUALITY_GATE_VERSION,
-                        "quality_thresholds": self.quality_config.model_dump(),
-                        "max_attempts": max_attempts,
-                        "native_min_chars": int(os.getenv("OCR_NATIVE_MIN_CHARS", "24")),
-                        "native_min_words": int(os.getenv("OCR_NATIVE_MIN_WORDS", "4")),
-                        "render_dpi": int(os.getenv("OCR_RENDER_DPI", "200")),
-                        "retry_render_dpi": int(os.getenv("OCR_RETRY_RENDER_DPI", "300")),
-                        "page_timeout_seconds": float(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "45")),
-                        "max_file_bytes": int(os.getenv("DOCUMENT_MAX_BYTES", str(10 * 1024 * 1024))),
-                        "max_pages": int(os.getenv("DOCUMENT_MAX_PAGES", "100")),
-                        "max_render_pixels": int(os.getenv("DOCUMENT_MAX_RENDER_PIXELS", "30000000")),
-                        "tesseract_language": os.getenv("TESSERACT_LANGUAGE", "eng"),
-                        "semantic_model": self.content_service.model,
-                        "classification_prompt_version": "content-classification-v1",
-                        "extraction_prompt_version": f"{EXTRACTION_PROMPT_VERSION}/per-document-type",
-                        "semantic_schema_version": "document-facts-v1",
-                        "retain_review_candidates": os.getenv("EXTRACTION_RETAIN_REVIEW_CANDIDATES", "false").strip().lower() in {"1", "true", "yes"},
-                        "content_batch_chars": self.content_service.max_chars,
-                        "content_batch_pages": self.content_service.max_pages,
-                        "gemini_timeout_seconds": float(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "45")),
-                        "gemini_max_attempts": max(1, min(int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")), 2)),
-                        "gemini_max_concurrency": max(1, min(int(os.getenv("GEMINI_MAX_CONCURRENCY", "3")), 8)),
-                    }
-                    processed = ProcessedDocument(run_id=run.id, document_id=stored.id,
-                        intake_document_id=intake_doc.id, claim_id=claim_id, role=role,
-                        attempt_number=attempt_number, checksum_sha256=digest, status="RUNNING",
-                        started_at=_now(), configuration=attempt_config)
-                    db.add(processed)
-                    db.commit()
-                    evidence = self.extractor.extract_evidence(validated,
-                        force_ocr_pages=retry_pages if attempt_number > 1 else None,
-                        render_dpi=int(attempt_config["retry_render_dpi"]) if attempt_number > 1 else None)
-                    normalized = self.normalizer.normalize_evidence(evidence, document_id=stored.id)
-                    validation = normalized.processing_metadata["validation"]
-                    final_disposition, retry_pages = self._persist_quality_attempt(
-                        db, processed, normalized, retry_exhausted=attempt_number == max_attempts)
-                    db.commit()
+                    item_id = str(intake_doc.id)
+                    item_role = "policy" if role == "policy_document" else "proof"
+                    source_artifact = autopsy.artifact_id(
+                        "source_document", {"sha256": intake_doc.checksum_sha256 or ""}, item_id=item_id,
+                    )
+                    with autopsy.stage(
+                        "document_processing", item_id=item_id, item_role=item_role,
+                        inputs=[source_artifact], attempt=attempt_number,
+                    ) as stage:
+                        stage.set_attribute("pipeline.stage.version", QUALITY_GATE_VERSION)
+                        with stage.operation("file_validation"):
+                            try:
+                                digest, validated = self._validate_file(item)
+                                stage.check(
+                                    "document.file_valid", kind="schema", result="pass",
+                                    action="continued", target=source_artifact,
+                                )
+                            except DocumentProcessingError as exc:
+                                stage.check(
+                                    "document.file_valid", kind="schema", result="fail",
+                                    action="blocked", target=source_artifact,
+                                    observed=exc.code or "FILE_VALIDATION_FAILED",
+                                )
+                                raise
+                        self._check_ocr(validated)
+                        attempt_config = {
+                            "config_version": config_version,
+                            "quality_gate_version": QUALITY_GATE_VERSION,
+                            "quality_thresholds": self.quality_config.model_dump(),
+                            "max_attempts": max_attempts,
+                            "native_min_chars": int(os.getenv("OCR_NATIVE_MIN_CHARS", "24")),
+                            "native_min_words": int(os.getenv("OCR_NATIVE_MIN_WORDS", "4")),
+                            "render_dpi": int(os.getenv("OCR_RENDER_DPI", "200")),
+                            "retry_render_dpi": int(os.getenv("OCR_RETRY_RENDER_DPI", "300")),
+                            "page_timeout_seconds": float(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "45")),
+                            "max_file_bytes": int(os.getenv("DOCUMENT_MAX_BYTES", str(10 * 1024 * 1024))),
+                            "max_pages": int(os.getenv("DOCUMENT_MAX_PAGES", "100")),
+                            "max_render_pixels": int(os.getenv("DOCUMENT_MAX_RENDER_PIXELS", "30000000")),
+                            "tesseract_language": os.getenv("TESSERACT_LANGUAGE", "eng"),
+                            "semantic_model": self.content_service.model,
+                            "classification_prompt_version": "content-classification-v1",
+                            "extraction_prompt_version": f"{EXTRACTION_PROMPT_VERSION}/per-document-type",
+                            "semantic_schema_version": "document-facts-v1",
+                            "retain_review_candidates": os.getenv("EXTRACTION_RETAIN_REVIEW_CANDIDATES", "false").strip().lower() in {"1", "true", "yes"},
+                            "content_batch_chars": self.content_service.max_chars,
+                            "content_batch_pages": self.content_service.max_pages,
+                            "gemini_timeout_seconds": float(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "45")),
+                            "gemini_max_attempts": max(1, min(int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")), 2)),
+                            "gemini_max_concurrency": max(1, min(int(os.getenv("GEMINI_MAX_CONCURRENCY", "3")), 8)),
+                        }
+                        processed = ProcessedDocument(run_id=run.id, document_id=stored.id,
+                            intake_document_id=intake_doc.id, claim_id=claim_id, role=role,
+                            attempt_number=attempt_number, checksum_sha256=digest, status="RUNNING",
+                            started_at=_now(), configuration=attempt_config)
+                        db.add(processed)
+                        db.commit()
+                        with stage.operation("text_extraction"):
+                            evidence = self.extractor.extract_evidence(validated,
+                                force_ocr_pages=retry_pages if attempt_number > 1 else None,
+                                render_dpi=int(attempt_config["retry_render_dpi"]) if attempt_number > 1 else None)
+                            normalized = self.normalizer.normalize_evidence(evidence, document_id=stored.id)
+                            faults.after_text_extraction(
+                                {"document_id": str(intake_doc.id), "role": role},
+                                normalized.pages,
+                                normalized.processing_metadata["validation"],
+                            )
+                        validation = normalized.processing_metadata["validation"]
+                        with stage.operation("quality_gate"):
+                            retried_pages = bool(retry_pages)
+                            final_disposition, retry_pages = self._persist_quality_attempt(
+                                db, processed, normalized, retry_exhausted=attempt_number == max_attempts)
+                            page_text = [
+                                {"page": page.page_number, "method": page.extraction_method, "text": page.raw_text}
+                                for page in normalized.pages
+                            ]
+                            page_text_id = stage.record_artifact(
+                                kind="page_text", content=page_text, item_id=item_id,
+                            )
+                            low_ratio = validation.get("low_confidence_word_proportion")
+                            low_ratio_label = f"{low_ratio:.2f}" if isinstance(low_ratio, (int, float)) else "na"
+                            min_chars_ok = all(
+                                row.get("character_count", 0) >= self.quality_config.min_character_count
+                                or row.get("status") == "BLANK"
+                                for row in validation.get("page_validations", [])
+                            )
+                            quality_result = "pass" if final_disposition == "ACCEPTED" else (
+                                "fail" if processed.quality_status == "FAIL" else "warn"
+                            )
+                            stage.check(
+                                "ocr.quality", kind="threshold", result=quality_result,
+                                action="continued" if final_disposition == "ACCEPTED" else "review",
+                                target=page_text_id,
+                                observed=f"low_conf_ratio={low_ratio_label};min_chars_ok={str(min_chars_ok).lower()}",
+                                expected=f"low_conf_ratio<={self.quality_config.max_low_confidence_ratio:g};min_chars_ok=true",
+                            )
+                            retry_exhausted = attempt_number == max_attempts and any(
+                                "retry limit was reached" in reason.lower()
+                                for reason in processed.validation_reasons
+                            )
+                            retry_exhausted = retry_exhausted or (
+                                attempt_number == max_attempts and retried_pages
+                            )
+                            if retry_exhausted:
+                                stage.check(
+                                    "ocr.retry_exhausted", kind="threshold", result="warn", action="review",
+                                    target=page_text_id, observed=f"attempt={attempt_number}",
+                                    expected=f"attempt<={max_attempts}",
+                                )
+                            if final_disposition != "ACCEPTED":
+                                stage.set_status("partial")
+                            db.commit()
                     if final_disposition == "RETRY_REQUIRED" and attempt_number < max_attempts:
                         continue
                     break

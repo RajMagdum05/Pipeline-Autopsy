@@ -71,7 +71,7 @@ def _seed_execution(*, diagnosed=False, with_graph=False, pipeline_name=None):
         if diagnosed:
             db.add(ObservationRecord(execution_id=execution_id, id="obs_001", family="check", code="quality.low",
                                      result="warn", stage="fetch@proof", detail="quality below target"))
-            db.add(FindingRecord(id="finding-1", execution_id=execution_id, stage="fetch", item_id="proof",
+            db.add(FindingRecord(id=f"finding-{suffix}", execution_id=execution_id, stage="fetch", item_id="proof",
                                  role="origin", classification="OUTPUT_CONTRACT_VIOLATION", confidence="supported",
                                  severity="warn", evidence=["obs_001"]))
             db.add(ExplanationRecord(execution_id=execution_id, source="template", summary="A stage failed.",
@@ -129,6 +129,42 @@ def test_diagnosis_is_409_until_ready_then_returns_persisted_result(client):
     assert result.json()["findings"][0]["item_id"] == "proof"
     assert result.json()["observations"][0]["code"] == "quality.low"
     assert result.json()["explanation"]["source"] == "template"
+
+
+def _set_signature(execution_id, signature):
+    with SessionLocal() as db:
+        finding = db.query(FindingRecord).filter_by(execution_id=execution_id).one()
+        finding.signature = signature
+        db.commit()
+        return finding.id
+
+
+def test_confirmed_finding_is_seen_on_replay(client):
+    first, pipeline = _seed_execution(diagnosed=True, pipeline_name="feedback-replay")
+    second, _ = _seed_execution(diagnosed=True, pipeline_name=pipeline)
+    first_finding = _set_signature(first, "sig-feedback-confirmed")
+    _set_signature(second, "sig-feedback-confirmed")
+
+    feedback = client.post(f"/v1/findings/{first_finding}/feedback",
+                           headers=HEADERS, json={"verdict": "confirmed", "comment": "verified"})
+    assert feedback.status_code == 201
+    replay = client.get(f"/v1/executions/{second}/diagnosis", headers=HEADERS)
+    finding = replay.json()["findings"][0]
+    assert finding["seen_before"] == 1
+    assert finding["seen_before_last_at"]
+
+
+def test_rejected_feedback_does_not_count_as_seen_before(client):
+    first, pipeline = _seed_execution(diagnosed=True, pipeline_name="feedback-rejected")
+    second, _ = _seed_execution(diagnosed=True, pipeline_name=pipeline)
+    first_finding = _set_signature(first, "sig-feedback-rejected")
+    _set_signature(second, "sig-feedback-rejected")
+
+    feedback = client.post(f"/v1/findings/{first_finding}/feedback",
+                           headers=HEADERS, json={"verdict": "rejected"})
+    assert feedback.status_code == 201
+    replay = client.get(f"/v1/executions/{second}/diagnosis", headers=HEADERS)
+    assert replay.json()["findings"][0]["seen_before"] == 0
 
 
 def test_normalized_spans_and_manual_requeue(client):

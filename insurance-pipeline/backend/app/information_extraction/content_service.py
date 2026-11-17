@@ -9,16 +9,16 @@ import time
 import re
 
 from app.document_processing.exceptions import DocumentProcessingError
-from app.telemetry.attributes import (
-    MODEL_NAME, OUTPUT_ARTIFACT_IDS, PROMPT_VERSION, STAGE_STATUS,
-    VALIDATION_RESULT, VALIDATION_RULE_ID, VALIDATION_STATUS,
+import autopsy_sdk as autopsy
+from app.observability.evidence import (
+    evidence_kinds, evidence_level, extracted_values, page_text_source,
+    redact_document_facts,
 )
-from app.telemetry.span_helpers import stage_span
+from app import faults
 from app.information_extraction.schemas import (
     ALLOWED_FIELDS, REPEATABLE_FIELDS, EXTRACTION_SCHEMAS, POLICY_SUBTYPE_SCHEMAS,
     Classification, DocumentExtraction, ExtractionValidationReport, ValidationCheck, ValidationIssue,
 )
-from opentelemetry import trace
 
 BASE = Path(__file__).resolve().parent
 CLASSIFIER_PROMPT_VERSION = "content-classification-v1"
@@ -96,6 +96,15 @@ def _parse_unambiguous_raw_date(value: str | None) -> date | None:
         return date(year, month, day)
     except ValueError:
         return None
+
+
+def _issue_field_path(reason: str) -> str | None:
+    """Extract only a schema-approved field path from a safe validation reason."""
+    allowed = sorted(set().union(*ALLOWED_FIELDS.values()), key=len, reverse=True)
+    for field_name in allowed:
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(field_name)}(?![A-Za-z0-9_])", reason):
+            return field_name
+    return None
 
 
 def page_batches(pages: list[dict], max_chars: int, max_pages: int) -> list[list[dict]]:
@@ -185,25 +194,70 @@ class DocumentContentService:
         return schema
 
     def _create_client(self):
+        if (faults.enabled() and os.getenv("AUTOPSY_FAKE_GEMINI", "false").strip().lower()
+                in {"1", "true", "yes", "on"}):
+            try:
+                from google.genai import types
+                from app.fake_gemini import FakeGemini
+            except ImportError as exc:
+                raise DocumentProcessingError(
+                    "FakeGemini requires the Google GenAI schema dependency.",
+                    error_class="infra", code="GENAI_DEPENDENCY_MISSING",
+                ) from exc
+            self._gemini_client = FakeGemini()
+            self._genai_types = types
+            return self._gemini_client, self._genai_types
         key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not key:
-            raise DocumentProcessingError("Semantic processing is unavailable: configure GEMINI_API_KEY (or GOOGLE_API_KEY) server-side.")
+            raise DocumentProcessingError(
+                "Semantic processing is unavailable: configure the server-side Gemini key.",
+                error_class="infra", code="GENAI_CONFIGURATION_MISSING",
+            )
         try:
             from google import genai
             from google.genai import types
         except ImportError as exc:
-            raise DocumentProcessingError("Semantic processing is unavailable: install the google-genai backend dependency.") from exc
+            raise DocumentProcessingError(
+                "Semantic processing is unavailable: install the Google GenAI dependency.",
+                error_class="infra", code="GENAI_DEPENDENCY_MISSING",
+            ) from exc
         timeout_ms = max(1000, int(float(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "45")) * 1000))
         self._gemini_client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=timeout_ms,
             retry_options=types.HttpRetryOptions(attempts=1)))
         self._genai_types = types
         return self._gemini_client, self._genai_types
 
-    def _request(self, prompt: str, response_schema):
+    def _request(self, prompt: str, response_schema, *, prompt_version: str, item_index: int,
+                 item_count: int, fault_item=None):
+        with autopsy.operation(
+            f"generate_content {self.model}",
+            attributes={
+                "gen_ai.operation.name": "generate_content",
+                "gen_ai.provider.name": "gcp.gemini",
+                "gen_ai.request.model": self.model,
+                "gen_ai.output.type": "json",
+                "pipeline.prompt.version": prompt_version,
+                "pipeline.schema.version": "classification-v1" if response_schema is Classification else SCHEMA_VERSION,
+                "pipeline.item.index": item_index,
+                "pipeline.item.count": item_count,
+            },
+        ) as span:
+            injected = faults.before_llm(
+                "content_classification" if response_schema is Classification else "information_extraction",
+                fault_item or {}, response_schema,
+            )
+            if injected is not None:
+                return injected
+            return self._request_with_span(prompt, response_schema, span)
+
+    def _request_with_span(self, prompt: str, response_schema, span):
         client, types = self._client()
         attempts = max(1, min(int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")), 2))
         if not self._semaphore.acquire(timeout=float(os.getenv("GEMINI_QUEUE_TIMEOUT_SECONDS", "10"))):
-            raise DocumentProcessingError("Gemini request capacity is busy; retry the document later.")
+            raise DocumentProcessingError(
+                "Gemini request capacity is busy; retry the document later.",
+                error_class="infra", code="GENAI_CAPACITY_BUSY",
+            )
         try:
             for attempt in range(attempts):
                 try:
@@ -225,7 +279,21 @@ class DocumentContentService:
                     text = getattr(response, "text", None)
                     if not text:
                         raise DocumentProcessingError("Gemini returned an empty structured response.")
-                    return response_schema.model_validate_json(text)
+                    result = response_schema.model_validate_json(text)
+                    response_model = getattr(response, "model_version", None)
+                    if response_model:
+                        span.set_attribute("gen_ai.response.model", str(response_model)[:128])
+                    if finish:
+                        span.set_attribute("gen_ai.response.finish_reasons", [finish])
+                    usage = getattr(response, "usage_metadata", None)
+                    if usage is not None:
+                        input_tokens = getattr(usage, "prompt_token_count", None)
+                        output_tokens = getattr(usage, "candidates_token_count", None)
+                        if isinstance(input_tokens, int) and input_tokens >= 0:
+                            span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
+                        if isinstance(output_tokens, int) and output_tokens >= 0:
+                            span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
+                    return result
                 except DocumentProcessingError:
                     raise
                 except Exception as exc:
@@ -235,7 +303,11 @@ class DocumentContentService:
                         or any(token in status_text for token in ("RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL"))
                         or isinstance(exc, (TimeoutError, ConnectionError)))
                     if attempt + 1 >= attempts or not retryable:
-                        raise DocumentProcessingError(f"Gemini structured request failed ({type(exc).__name__}).") from exc
+                        raise DocumentProcessingError(
+                            f"Gemini structured request failed ({type(exc).__name__}).",
+                            error_class="infra" if retryable else "data",
+                            code="GENAI_REQUEST_FAILED" if retryable else "GENAI_RESPONSE_INVALID",
+                        ) from exc
                     time.sleep(min(2 ** attempt, 2))
         finally:
             self._semaphore.release()
@@ -275,9 +347,11 @@ class DocumentContentService:
             return Classification(detected_type="unreadable", disposition="unreadable", reasons=["No usable OCR text was supplied."]), {"processed_pages": []}
         template = (BASE / "prompts" / "classification_v1.txt").read_text(encoding="utf-8")
         results, evidence_errors = [], []
-        for batch in batches:
+        for batch_index, batch in enumerate(batches, start=1):
             prompt = f"{template}\nDECLARED_TYPE={declared_type}\nDOCUMENT_TEXT_JSON:\n{self._text(batch)}"
-            result = self._request(prompt, Classification)
+            result = self._request(prompt, Classification, prompt_version=CLASSIFIER_PROMPT_VERSION,
+                                   item_index=batch_index, item_count=len(batches),
+                                   fault_item={"role": declared_type, "pages": batch})
             errors = self._check_quotes(result.model_dump(), batch)
             evidence_errors.extend(errors)
             results.append(result)
@@ -333,12 +407,22 @@ class DocumentContentService:
         page_coverage_complete = submitted_page_numbers == expected_page_numbers
         all_facts, warnings = [], []
         validation_errors = [] if page_coverage_complete else ["The extraction request did not cover every source page in order."]
-        for batch in batches:
+        for batch_index, batch in enumerate(batches, start=1):
             prompt = (f"{template}\nDETECTED_TYPE={detected_type}\nDETECTED_SUBTYPE={subtype or 'unknown'}\n"
                       f"DOCUMENT_TEXT_JSON:\n{self._text(batch)}")
-            result = self._request(prompt, schema)
+            result = self._request(prompt, schema, prompt_version=EXTRACTION_PROMPT_VERSION,
+                                   item_index=batch_index, item_count=len(batches),
+                                   fault_item={"role": detected_type, "pages": batch})
+            faults.after_extraction({"role": detected_type, "pages": batch}, result.facts)
             payload = result.model_dump()
-            validation_errors.extend(self._check_quotes(payload, batch))
+            quote_errors = self._check_quotes(payload, batch)
+            skipped_fields = faults.validator_overrides({"role": detected_type}).get(
+                "skip_quote_fields", set())
+            validation_errors.extend(
+                error for error in quote_errors
+                if not any(error.startswith(f"Unsupported evidence for {field}:")
+                           for field in skipped_fields)
+            )
             for fact in payload["facts"]:
                 if fact["field_name"] not in ALLOWED_FIELDS[detected_type]:
                     validation_errors.append(f"Unsupported field name: {fact['field_name']}.")
@@ -477,7 +561,16 @@ class DocumentContentService:
             raise DocumentProcessingError("No persisted OCR/native-text pages are available for extraction.")
         if [page.page_number for page in saved_pages] != list(range(1, len(saved_pages) + 1)) or any(page.status not in {"COMPLETED", "SUCCESS", "complete", "success"} for page in saved_pages):
             raise DocumentProcessingError("Persisted OCR page coverage is incomplete; semantic extraction is blocked.")
-        pages = [{"page_number": page.page_number, "text": page.raw_text or ""} for page in saved_pages]
+        pages = [{"page_number": page.page_number, "text": page.raw_text or ""}
+                 for page in saved_pages]
+        page_text_content = [
+            {"page": page.page_number, "method": page.extraction_method,
+             "text": page.raw_text or ""}
+            for page in saved_pages
+        ]
+        page_text_id = autopsy.artifact_id(
+            "page_text", page_text_content, item_id=str(processed.intake_document_id),
+        )
         base = {"claim_id": processed.claim_id, "document_id": processed.document_id,
                 "declared_type": declared_type, "input_checksum_sha256": checksum,
                 "processing_attempt": processed.attempt_number}
@@ -498,7 +591,44 @@ class DocumentContentService:
         processed.status = "CLASSIFYING"
         db.commit()
         try:
-            classification, class_meta = self.classify(pages, declared_type)
+            with autopsy.stage(
+                "content_classification", item_id=str(processed.intake_document_id),
+                item_role="policy" if declared_type == "policy_document" else "proof",
+                inputs=[page_text_id], attempt=processed.attempt_number,
+            ) as classification_stage:
+                classification_stage.set_attribute("pipeline.prompt.version", CLASSIFIER_PROMPT_VERSION)
+                classification, class_meta = self.classify(pages, declared_type)
+                classification_payload = {**base, **classification.model_dump(), **class_meta,
+                    "prompt_version": CLASSIFIER_PROMPT_VERSION, "model_id": self.model}
+                classification_status = {"mismatch": "content_mismatch", "unsupported": "review_required"}.get(
+                    classification.disposition, classification.disposition)
+                save("classification", classification_status, classification_payload,
+                     CLASSIFIER_PROMPT_VERSION, started_at=classification_started)
+                classification_artifact_id = classification_stage.record_artifact(
+                    "classification", classification_payload,
+                    item_id=str(processed.intake_document_id),
+                )
+                evidence_errors = class_meta.get("evidence_errors", [])
+                classification_stage.check(
+                    "classification.evidence_quotes", kind="grounding",
+                    result="fail" if evidence_errors else "pass",
+                    action="review" if evidence_errors else "continued",
+                    target=classification_artifact_id,
+                    observed="unsupported_quote" if evidence_errors else "quotes_supported",
+                    expected="quote_in_source",
+                )
+                mismatch = (classification.disposition == "mismatch"
+                            or classification.detected_type != declared_type
+                            and classification.detected_type not in {"unknown", "unsupported", "mixed_document", "unreadable"})
+                classification_stage.check(
+                    "classification.matches_declared", kind="classification",
+                    result="fail" if mismatch else "pass",
+                    action="review" if mismatch else "continued",
+                    target=classification_artifact_id,
+                    observed=classification.detected_type, expected=declared_type,
+                )
+                if classification.disposition != "accepted":
+                    classification_stage.set_status("partial")
         except Exception as exc:
             details = {**base, "status": "review_required", "reasons": [f"Classification processing failed ({type(exc).__name__})."]}
             details["disposition"] = "classification_failed"
@@ -507,11 +637,6 @@ class DocumentContentService:
             save("extraction", "not_run", {**base, "status": "extraction_pending", "reason": "Classification did not complete."}, EXTRACTION_PROMPT_VERSION)
             return "classification_failed"
 
-        classification_payload = {**base, **classification.model_dump(), **class_meta,
-            "prompt_version": CLASSIFIER_PROMPT_VERSION, "model_id": self.model}
-        classification_status = {"mismatch": "content_mismatch", "unsupported": "review_required"}.get(
-            classification.disposition, classification.disposition)
-        save("classification", classification_status, classification_payload, CLASSIFIER_PROMPT_VERSION, started_at=classification_started)
         if classification.disposition != "accepted":
             reason = "Document classification did not pass the acceptance gate."
             save("application_validation", classification_status, {**base, "status": classification_status, "reasons": [reason]}, "application-validation-v1")
@@ -522,7 +647,48 @@ class DocumentContentService:
         db.commit()
         extraction_started = _now()
         try:
-            extracted, validation = self.extract(pages, classification.detected_type, classification.subtype)
+            extraction_prompt_version = f"{EXTRACTION_PROMPT_VERSION}/{classification.detected_type}"
+            with autopsy.stage(
+                "information_extraction", item_id=str(processed.intake_document_id),
+                item_role="policy" if declared_type == "policy_document" else "proof",
+                inputs=[page_text_id, classification_artifact_id], attempt=processed.attempt_number,
+            ) as extraction_stage:
+                extraction_stage.set_attribute("pipeline.prompt.version", EXTRACTION_PROMPT_VERSION)
+                extraction_stage.set_attribute("pipeline.schema.version", SCHEMA_VERSION)
+                extracted, validation = self.extract(pages, classification.detected_type, classification.subtype)
+                page_coverage_complete = bool(validation.get("page_coverage_complete"))
+                extraction_stage.check(
+                    "extraction.page_coverage", kind="schema",
+                    result="pass" if page_coverage_complete else "fail",
+                    action="continued" if page_coverage_complete else "review",
+                    target=page_text_id,
+                    observed=f"processed_pages={len(validation.get('processed_pages', []))};expected_pages={len(validation.get('expected_pages', []))}",
+                    expected="complete_in_order",
+                )
+                document_facts_payload = {
+                    "detected_type": classification.detected_type,
+                    "subtype": extracted.subtype,
+                    "facts": [fact.model_dump() for fact in extracted.facts],
+                }
+                document_facts_id = extraction_stage.record_artifact(
+                    "document_facts", document_facts_payload,
+                    item_id=str(processed.intake_document_id),
+                    upload_content=(redact_document_facts(document_facts_payload)
+                                    if evidence_level() == "E2" and "document_facts" in evidence_kinds()
+                                    else None),
+                    upload_redaction=("fields" if evidence_level() == "E2"
+                                      and "document_facts" in evidence_kinds() else None),
+                )
+                if evidence_level() == "E2" and "page_text" in evidence_kinds():
+                    extraction_stage.upload_evidence(
+                        "page_text", page_text_content,
+                        item_id=str(processed.intake_document_id),
+                        excerpt_values=extracted_values(document_facts_payload),
+                        upload_content=page_text_source(page_text_content),
+                        stage_name="document_processing",
+                    )
+                if not page_coverage_complete:
+                    extraction_stage.set_status("partial")
         except Exception as exc:
             prompt_version = f"{EXTRACTION_PROMPT_VERSION}/{classification.detected_type}"
             save("extraction", "failed", {**base, "status": "extraction_failed", "reasons": [f"Structured extraction failed ({type(exc).__name__})."]}, prompt_version, type(exc).__name__, extraction_started)
@@ -531,93 +697,127 @@ class DocumentContentService:
 
         processed.status = "VALIDATING"
         db.commit()
-        prompt_version = f"{EXTRACTION_PROMPT_VERSION}/{classification.detected_type}"
-        invalid_structure = any(reason.startswith(("Unsupported field name", "Found/conflicting field has no raw value", "missing field contains a value", "not_applicable field contains a value", "unreadable field contains a value")) for reason in validation["reasons"])
-        app_status = "failed" if invalid_structure else validation["status"]
-        disposition = "extraction_failed" if invalid_structure else "accepted" if app_status == "passed" else "review_required"
-        extraction_payload = {**base, "detected_type": classification.detected_type,
-            "processed_pages": validation["processed_pages"], "model_id": self.model,
-            "prompt_version": prompt_version, "schema_version": SCHEMA_VERSION,
-            "status": app_status}
-        retain_candidate = os.getenv("EXTRACTION_RETAIN_REVIEW_CANDIDATES", "false").strip().lower() in {"1", "true", "yes"}
-        if app_status == "passed" or retain_candidate:
-            extraction_payload.update(extracted.model_dump())
-        else:
-            extraction_payload["candidate_retained"] = False
-            extraction_payload["candidate_omission_reason"] = "Application validation did not pass; only validation reasons are retained by default."
-        extraction_status = "complete" if app_status == "passed" else "failed" if app_status == "failed" else "review_required"
-        issue_code_by_reason = {
-            "Unsupported field name": "UNKNOWN_FIELD",
-            "Found/conflicting field has no raw value": "FIELD_STATE_VALUE_MISSING",
-            "Found/conflicting field has no source evidence": "FIELD_EVIDENCE_MISSING",
-            "Raw value is not contained": "RAW_VALUE_NOT_IN_EVIDENCE",
-            "Unsupported evidence": "EVIDENCE_UNSUPPORTED",
-            "Unsupported classification": "EVIDENCE_UNSUPPORTED",
-            "Unsupported component": "EVIDENCE_UNSUPPORTED",
-            "Conflicting values": "CONFLICTING_VALUES",
-            "is after": "DATE_ORDER_INVALID",
-            "Ambiguous or invalid normalized date": "DATE_NORMALIZATION_INVALID",
-            "Invalid normalized decimal": "DECIMAL_NORMALIZATION_INVALID",
-            "Normalized currency": "CURRENCY_NORMALIZATION_INVALID",
-            "Reported subtotal": "BILL_ARITHMETIC_MISMATCH",
-            "Bill arithmetic": "BILL_ARITHMETIC_NOT_EVALUATED",
-            "page": "PAGE_COVERAGE_INVALID",
-        }
-        issues = []
-        for reason in validation["reasons"]:
-            code = next((code for prefix, code in issue_code_by_reason.items() if reason.startswith(prefix)), "EXTRACTION_REVIEW_REQUIRED")
-            severity = "blocking" if code in {"UNKNOWN_FIELD", "FIELD_STATE_VALUE_MISSING"} else "review"
-            issues.append(ValidationIssue(code=code, severity=severity, message=reason[:240]))
-        check_ids = ["schema_structure", "allowed_fields", "field_state_consistency", "source_evidence", "page_coverage", "normalized_values", "date_order", "bill_arithmetic"]
-        reason_groups = {
-            "allowed_fields": ("Unsupported field name",),
-            "field_state_consistency": ("field has no raw value", "field has no source evidence", "field contains a value", "Missing/not-applicable field has source evidence", "Normalized value has no source value"),
-            "source_evidence": ("Unsupported evidence", "Unsupported classification quote", "Unsupported component", "Raw value is not contained", "Found/conflicting field has no source evidence"),
-            "page_coverage": ("page coverage", "request did not cover every source page"),
-            "normalized_values": ("Ambiguous or invalid normalized", "Ambiguous source date", "Invalid normalized decimal", "Raw and normalized monetary values differ", "Normalized currency"),
-            "date_order": (" is after ",),
-        }
-        validation_checks = []
-        for check_id in check_ids:
-            related = [issue for issue in issues if any(token in issue.message for token in reason_groups.get(check_id, ()))]
-            outcome = "fail" if related else "pass"
-            required = check_id not in {"date_order", "bill_arithmetic"}
-            if check_id == "bill_arithmetic":
-                bill_warnings = [warning for warning in validation["consistency_warnings"] if "Bill arithmetic" in warning or "bill totals" in warning or "subtotal" in warning]
-                if bill_warnings:
-                    outcome = "not_evaluated" if "not evaluated" in bill_warnings[0].lower() or "could not" in bill_warnings[0].lower() else "fail"
-                else:
-                    relevant = {f.get("field_name") for f in extracted.facts if f.field_status == "found"}
-                    outcome = "pass" if {"subtotal", "total"}.issubset(relevant) and relevant.intersection({"taxes", "discount", "credits"}) else "not_evaluated"
-            if check_id == "bill_arithmetic" and outcome == "fail":
-                related = [issue for issue in issues if issue.code == "BILL_ARITHMETIC_MISMATCH"]
-            validation_checks.append(ValidationCheck(check_id=check_id, outcome=outcome, required=required,
-                issue_codes=[issue.code for issue in related]))
-        with stage_span(trace.get_tracer(__name__), "information_extraction_validation", str(processed.run_id), str(processed.intake_document_id),
-                input_artifact_ids=[str(processed.id)], stage_version=EXTRACTION_VALIDATOR_VERSION,
-                extra_attributes={VALIDATION_STATUS: app_status,
-                    VALIDATION_RESULT: disposition,
-                    VALIDATION_RULE_ID: check_ids,
-                    "validator.version": EXTRACTION_VALIDATOR_VERSION,
-                    "extraction.attempt": processed.attempt_number,
-                    "input.checksum": checksum}):
-            report = ExtractionValidationReport(
-            claim_id=str(processed.claim_id), document_id=str(processed.intake_document_id),
-            accepted_document_type=classification.detected_type, extraction_attempt=processed.attempt_number,
-            input_version=checksum, validator_version=EXTRACTION_VALIDATOR_VERSION,
-            configuration_version="application-validation-v1", overall_disposition=disposition,
-            status=app_status, checks=validation_checks,
-                issues=issues, started_at=extraction_started, completed_at=_now())
-        report_payload = report.model_dump(mode="json")
-        validation_payload = {**base, **validation, "status": disposition, "classification_disposition": classification.disposition,
-            "extraction_disposition": "extraction_complete" if app_status == "passed" else "extraction_failed",
-            "policy_set_state": "single_policy_upload_completeness_not_established" if declared_type == "policy_document" else None,
-            "model_policy_set_assessment": classification.policy_set_complete if declared_type == "policy_document" else None,
-            "model_id": self.model, "prompt_version": "application-validation-v1", "schema_version": SCHEMA_VERSION}
-        save("extraction", extraction_status, extraction_payload, prompt_version, started_at=extraction_started, commit=False)
-        save("application_validation", app_status, {**validation_payload, "report": report_payload}, "application-validation-v1", started_at=extraction_started, commit=False)
-        db.commit()
-        return "accepted" if app_status == "passed" else disposition
+        prompt_version = extraction_prompt_version
+        with autopsy.stage(
+            "extraction_validation", item_id=str(processed.intake_document_id),
+            item_role="policy" if declared_type == "policy_document" else "proof",
+            inputs=[document_facts_id, page_text_id], attempt=processed.attempt_number,
+        ) as validation_stage:
+            validation_stage.set_attribute("pipeline.stage.version", EXTRACTION_VALIDATOR_VERSION)
+            invalid_structure = any(reason.startswith(("Unsupported field name", "Found/conflicting field has no raw value", "missing field contains a value", "not_applicable field contains a value", "unreadable field contains a value")) for reason in validation["reasons"])
+            app_status = "failed" if invalid_structure else validation["status"]
+            disposition = "extraction_failed" if invalid_structure else "accepted" if app_status == "passed" else "review_required"
+            extraction_payload = {**base, "detected_type": classification.detected_type,
+                "processed_pages": validation["processed_pages"], "model_id": self.model,
+                "prompt_version": prompt_version, "schema_version": SCHEMA_VERSION,
+                "status": app_status}
+            retain_candidate = os.getenv("EXTRACTION_RETAIN_REVIEW_CANDIDATES", "false").strip().lower() in {"1", "true", "yes"}
+            if app_status == "passed" or retain_candidate:
+                extraction_payload.update(extracted.model_dump())
+            else:
+                extraction_payload["candidate_retained"] = False
+                extraction_payload["candidate_omission_reason"] = "Application validation did not pass; only validation reasons are retained by default."
+            extraction_status = "complete" if app_status == "passed" else "failed" if app_status == "failed" else "review_required"
+            issue_code_by_reason = {
+                "Unsupported field name": "UNKNOWN_FIELD",
+                "Found/conflicting field has no raw value": "FIELD_STATE_VALUE_MISSING",
+                "Found/conflicting field has no source evidence": "FIELD_EVIDENCE_MISSING",
+                "Raw value is not contained": "RAW_VALUE_NOT_IN_EVIDENCE",
+                "Unsupported evidence": "EVIDENCE_UNSUPPORTED",
+                "Unsupported classification": "EVIDENCE_UNSUPPORTED",
+                "Unsupported component": "EVIDENCE_UNSUPPORTED",
+                "Conflicting values": "CONFLICTING_VALUES",
+                "is after": "DATE_ORDER_INVALID",
+                "Ambiguous or invalid normalized date": "DATE_NORMALIZATION_INVALID",
+                "Invalid normalized decimal": "DECIMAL_NORMALIZATION_INVALID",
+                "Normalized currency": "CURRENCY_NORMALIZATION_INVALID",
+                "Reported subtotal": "BILL_ARITHMETIC_MISMATCH",
+                "Bill arithmetic": "BILL_ARITHMETIC_NOT_EVALUATED",
+                "page": "PAGE_COVERAGE_INVALID",
+            }
+            issues = []
+            for reason in validation["reasons"]:
+                code = next((code for prefix, code in issue_code_by_reason.items() if reason.startswith(prefix)), "EXTRACTION_REVIEW_REQUIRED")
+                severity = "blocking" if code in {"UNKNOWN_FIELD", "FIELD_STATE_VALUE_MISSING"} else "review"
+                issues.append(ValidationIssue(code=code, severity=severity,
+                    field_path=_issue_field_path(reason), message=reason[:240]))
+            check_ids = ["schema_structure", "allowed_fields", "field_state_consistency", "source_evidence", "page_coverage", "normalized_values", "date_order", "bill_arithmetic"]
+            reason_groups = {
+                "allowed_fields": ("Unsupported field name",),
+                "field_state_consistency": ("field has no raw value", "field has no source evidence", "field contains a value", "Missing/not-applicable field has source evidence", "Normalized value has no source value"),
+                "source_evidence": ("Unsupported evidence", "Unsupported classification quote", "Unsupported component", "Raw value is not contained", "Found/conflicting field has no source evidence"),
+                "page_coverage": ("page coverage", "request did not cover every source page"),
+                "normalized_values": ("Ambiguous or invalid normalized", "Ambiguous source date", "Invalid normalized decimal", "Raw and normalized monetary values differ", "Normalized currency"),
+                "date_order": (" is after ",),
+            }
+            validation_checks = []
+            for check_id in check_ids:
+                related = [issue for issue in issues if any(token in issue.message for token in reason_groups.get(check_id, ()))]
+                outcome = "fail" if related else "pass"
+                required = check_id not in {"date_order", "bill_arithmetic"}
+                if check_id == "bill_arithmetic":
+                    bill_warnings = [warning for warning in validation["consistency_warnings"] if "Bill arithmetic" in warning or "bill totals" in warning or "subtotal" in warning]
+                    if bill_warnings:
+                        outcome = "not_evaluated" if "not evaluated" in bill_warnings[0].lower() or "could not" in bill_warnings[0].lower() else "fail"
+                    else:
+                        relevant = {f.field_name for f in extracted.facts if f.field_status == "found"}
+                        outcome = "pass" if {"subtotal", "total"}.issubset(relevant) and relevant.intersection({"taxes", "discount", "credits"}) else "not_evaluated"
+                if check_id == "bill_arithmetic" and outcome == "fail":
+                    related = [issue for issue in issues if issue.code == "BILL_ARITHMETIC_MISMATCH"]
+                validation_checks.append(ValidationCheck(check_id=check_id, outcome=outcome, required=required,
+                    issue_codes=[issue.code for issue in related]))
+            issue_by_code = {issue.code: issue for issue in issues}
+            for validation_check in validation_checks:
+                telemetry_check_id = (
+                    "quote_support" if validation_check.check_id == "source_evidence"
+                    else validation_check.check_id
+                )
+                related = [issue_by_code[code] for code in validation_check.issue_codes
+                           if code in issue_by_code]
+                fields = sorted({issue.field_path for issue in related if issue.field_path}) or [None]
+                result = {
+                    "pass": "pass", "fail": "fail", "not_evaluated": "skip",
+                }[validation_check.outcome]
+                for field_path in fields:
+                    validation_stage.check(
+                        f"extraction.{telemetry_check_id}",
+                        kind="grounding" if telemetry_check_id == "quote_support" else "schema",
+                        result=result,
+                        action="continued" if result == "pass" else "review",
+                        target=document_facts_id, field=field_path,
+                        observed=validation_check.outcome,
+                        expected="pass" if validation_check.required else "evaluated_if_available",
+                    )
+            if app_status == "passed":
+                validated_facts_payload = {
+                    "detected_type": classification.detected_type,
+                    "facts": [fact.model_dump() for fact in extracted.facts
+                              if fact.field_status == "found"],
+                }
+                validation_stage.record_artifact(
+                    "validated_facts", validated_facts_payload,
+                    item_id=str(processed.intake_document_id),
+                )
+            else:
+                validation_stage.set_status("partial")
+            with autopsy.operation("information_extraction.validation"):
+                report = ExtractionValidationReport(
+                claim_id=str(processed.claim_id), document_id=str(processed.intake_document_id),
+                accepted_document_type=classification.detected_type, extraction_attempt=processed.attempt_number,
+                input_version=checksum, validator_version=EXTRACTION_VALIDATOR_VERSION,
+                configuration_version="application-validation-v1", overall_disposition=disposition,
+                status=app_status, checks=validation_checks,
+                    issues=issues, started_at=extraction_started, completed_at=_now())
+            report_payload = report.model_dump(mode="json")
+            validation_payload = {**base, **validation, "status": disposition, "classification_disposition": classification.disposition,
+                "extraction_disposition": "extraction_complete" if app_status == "passed" else "extraction_failed",
+                "policy_set_state": "single_policy_upload_completeness_not_established" if declared_type == "policy_document" else None,
+                "model_policy_set_assessment": classification.policy_set_complete if declared_type == "policy_document" else None,
+                "model_id": self.model, "prompt_version": "application-validation-v1", "schema_version": SCHEMA_VERSION}
+            save("extraction", extraction_status, extraction_payload, prompt_version, started_at=extraction_started, commit=False)
+            save("application_validation", app_status, {**validation_payload, "report": report_payload}, "application-validation-v1", started_at=extraction_started, commit=False)
+            db.commit()
+            return "accepted" if app_status == "passed" else disposition
 
     @staticmethod
     def _validate_normalized(fact: dict, errors: list[str]) -> None:

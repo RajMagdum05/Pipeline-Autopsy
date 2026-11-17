@@ -17,14 +17,17 @@ services:
 
   api:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
+      context: ..
+      dockerfile: insurance-pipeline/backend/Dockerfile
     environment:
       DATABASE_URL: postgresql+psycopg://insurance:insurance_dev@postgres:5432/insurance_pipeline
-      PIPELINE_ROOT: /app
+      PIPELINE_ROOT: /app/insurance-pipeline
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-false}
+      AUTOPSY_FAKE_GEMINI: ${AUTOPSY_FAKE_GEMINI:-false}
+      AUTOPSY_FAKE_GEMINI_RESULTS: ${AUTOPSY_FAKE_GEMINI_RESULTS:-/app/insurance-pipeline/demo_documents/gemini_demo_results.json}
     ports:
       - "8000:8000"
     volumes:

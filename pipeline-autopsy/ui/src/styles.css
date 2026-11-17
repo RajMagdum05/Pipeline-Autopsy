@@ -122,6 +122,11 @@ tbody tr:not(.skeleton-row):hover { background: #fbfdfd; }
 .summary-card { position: relative; margin-bottom: 15px; padding: 18px 19px 15px; }
 .summary-card__source { position: absolute; top: 15px; right: 16px; color: #4d817c; font-size: 10px; font-weight: 600; text-transform: uppercase; }
 .summary-card > p { max-width: 900px; margin: 0 100px 13px 0; color: #32475c; font-size: 14px; line-height: 1.55; }
+.explanation-narrative { display: grid; gap: 6px; max-width: 1050px; margin: 0 0 14px; padding-left: 18px; color: #536679; font-size: 12px; line-height: 1.5; }
+.remediation-list { display: grid; gap: 9px; margin: 13px 0; }
+.remediation-list article { border-left: 3px solid #7caaa4; padding: 3px 11px; }
+.remediation-list h3 { margin: 0 0 4px; font-size: 12px; color: #304d4b; }
+.remediation-list p { margin: 0; white-space: pre-wrap; color: #536578; font-size: 12px; line-height: 1.5; }
 .summary-origin { display: inline-flex; align-items: center; gap: 8px; margin: 3px 8px 0 0; padding: 7px 9px; border: 1px solid #f0d5d1; border-radius: 6px; color: #5d3a37; background: #fff9f8; font-size: 10px; cursor: pointer; }
 .summary-origin:hover { border-color: #d9948c; }
 .summary-origin strong { font-family: Consolas, 'Courier New', monospace; }
@@ -173,6 +178,10 @@ tbody tr:not(.skeleton-row):hover { background: #fbfdfd; }
 .finding-confidence { color: #758497; font-size: 9px; text-transform: capitalize; }
 .finding-link { grid-column: 2 / -1; color: #8794a0; font-size: 9px; }
 .finding-causes { margin: 4px 0 4px 8px; color: #8190a0; font-size: 10px; }
+.finding-feedback { display: flex; flex-wrap: wrap; align-items: end; gap: 6px; margin: 0 0 12px 8px; }
+.finding-feedback label { display: grid; gap: 3px; flex: 1 1 100%; color: #657588; font-size: 10px; }
+.finding-feedback textarea { max-width: 420px; border: 1px solid #dbe3eb; border-radius: 5px; padding: 6px; font: inherit; resize: vertical; }
+.feedback-status { color: #587a75; font-size: 10px; }
 .evidence-panel .section-heading { margin-bottom: 13px; }
 .selected-finding { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 14px; padding: 9px; border-radius: 6px; background: #f7f9fb; font-size: 10px; }
 .selected-finding > strong { color: #33485d; }
