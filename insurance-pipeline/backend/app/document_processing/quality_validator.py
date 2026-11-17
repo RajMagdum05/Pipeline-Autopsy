@@ -1,20 +1,7 @@
 from typing import List, Union, Optional, Dict, Any
 import math
 from pydantic import BaseModel, Field
-from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
-from app.telemetry.attributes import (
-    EXECUTION_ENTITY_ID,
-    EXECUTION_ID,
-    ERROR_MESSAGE,
-    ERROR_TYPE,
-    INPUT_ARTIFACT_IDS,
-    OUTPUT_ARTIFACT_IDS,
-    STAGE_STATUS,
-)
-from app.telemetry.span_helpers import stage_span
-
-tracer = trace.get_tracer("enterprise_pipeline.ocr_validation")
+import autopsy_sdk as autopsy
 
 from app.document_processing.schemas import OCRResult, OCRPage, OCRLine, OCRWord
 
@@ -270,22 +257,7 @@ class OCRQualityValidator:
         else:
             res_obj = ocr_result
 
-        parent_attrs = getattr(trace.get_current_span(), "attributes", {}) or {}
-        resolved_claim_id = claim_id or parent_attrs.get(EXECUTION_ENTITY_ID) or "unknown"
-        resolved_execution_id = execution_id or parent_attrs.get(EXECUTION_ID) or "exec_unknown"
-        doc_artifact_ids = [f"art_ocr_{res_obj.document_id}"] if res_obj.document_id is not None else []
-        with stage_span(
-            tracer=tracer,
-            stage_name="ocr_validation",
-            span_name="ocr_validation.document",
-            execution_id=resolved_execution_id,
-            entity_id=str(resolved_claim_id),
-            input_artifact_ids=doc_artifact_ids,
-            extra_attributes={"document_id": res_obj.document_id} if res_obj.document_id is not None else None,
-            safe_error_message="OCR document validation failed.",
-        ) as span:
-            if res_obj.document_id is not None:
-                span.set_attribute("document_id", res_obj.document_id)
+        with autopsy.operation("ocr_validation.document") as span:
 
             page_validations: List[OCRPageValidationResult] = []
             conf_scores: List[float] = []
@@ -329,23 +301,8 @@ class OCRQualityValidator:
             confidence_coverage = confidence_words / total_words if total_words else None
             low_confidence_ratio = low_confidence_words / confidence_words if confidence_words else None
 
-            span.set_attribute("validation.overall_status", overall_status)
-            span.set_attribute("validation.total_pages", total_pages)
-            span.set_attribute("validation.passed_pages_count", pass_count)
-            span.set_attribute("validation.warning_pages_count", warn_count)
-            span.set_attribute("validation.failed_pages_count", fail_count)
-            span.set_attribute(
-                OUTPUT_ARTIFACT_IDS,
-                [f"art_ocr_val_{res_obj.document_id}"] if res_obj.document_id is not None else [],
-            )
-            if avg_doc_conf is not None:
-                span.set_attribute("validation.avg_confidence", avg_doc_conf)
-
-            if overall_status == "FAIL":
-                span.set_attribute(STAGE_STATUS, "failed")
-                span.set_attribute(ERROR_TYPE, "OCRQualityValidationError")
-                span.set_attribute(ERROR_MESSAGE, "OCR quality validation failed.")
-                span.set_status(Status(StatusCode.ERROR, "OCR quality validation failed."))
+            # OCR metrics belong to the result model. The SDK operation deliberately
+            # carries no document, claim, or extracted-content values.
 
             nonblank = [result for result in page_validations if result.status != "BLANK"]
             if not nonblank:

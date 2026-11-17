@@ -215,3 +215,23 @@ class ExplanationRecord(Base):
     tokens_in = Column(Integer, nullable=True)
     tokens_out = Column(Integer, nullable=True)
     latency_ms = Column(Float, nullable=True)
+
+
+class PlaybookRecord(Base):
+    __tablename__ = "playbooks"
+
+    id = Column(String(128), primary_key=True)
+    title = Column(String(255), nullable=False)
+    match = Column(JSON_TYPE, default=dict, nullable=False)
+    body = Column(Text, nullable=False)
+    pack = Column(String(128), nullable=False, default="generic")
+
+
+class FeedbackRecord(Base):
+    __tablename__ = "feedback"
+
+    id = Column(String(64), primary_key=True, default=_gen_uuid)
+    finding_id = Column(String(64), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False, index=True)
+    verdict = Column(String(16), nullable=False)
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

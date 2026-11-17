@@ -1,12 +1,12 @@
-import { render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { getDiagnosis, getExecution, getExecutionGraph, getExecutionSpans, getPipelines } from '../api'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { getDiagnosis, getExecution, getExecutionGraph, getExecutionSpans, getPipelines, submitFindingFeedback } from '../api'
 import { RunPage } from './RunPage'
 
 vi.mock('../api', () => ({
   getArtifact: vi.fn(), getDiagnosis: vi.fn(), getExecution: vi.fn(), getExecutionGraph: vi.fn(),
-  getExecutionSpans: vi.fn(), getPipelines: vi.fn(), requeueDiagnosis: vi.fn(),
+  getExecutionSpans: vi.fn(), getPipelines: vi.fn(), requeueDiagnosis: vi.fn(), submitFindingFeedback: vi.fn(),
 }))
 
 beforeEach(() => {
@@ -41,6 +41,8 @@ beforeEach(() => {
   })
 })
 
+afterEach(cleanup)
+
 describe('RunPage', () => {
   it('shows the failing fetch stage as the origin with its schema evidence', async () => {
     const { container } = render(<MemoryRouter initialEntries={['/runs/toy_short_body']}>
@@ -50,5 +52,18 @@ describe('RunPage', () => {
     expect(screen.getAllByText('OUTPUT CONTRACT VIOLATION').length).toBeGreaterThan(0)
     expect(screen.getByText('fetch produced a page below the declared schema minimum.')).toBeTruthy()
     expect(container.querySelector('[data-role="origin"][data-stage="fetch"]')).not.toBeNull()
+  })
+
+  it('submits confirmation and an optional comment for an origin finding', async () => {
+    vi.mocked(submitFindingFeedback).mockResolvedValue()
+    render(<MemoryRouter initialEntries={['/runs/toy_short_body']}>
+      <Routes><Route path="/runs/:executionId" element={<RunPage />} /></Routes>
+    </MemoryRouter>)
+    const comment = await screen.findByLabelText('Feedback comment (optional)')
+    fireEvent.change(comment, { target: { value: 'Reviewed against the source.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm finding' }))
+    await waitFor(() => expect(submitFindingFeedback).toHaveBeenCalledWith(
+      'finding-1', 'confirmed', 'Reviewed against the source.',
+    ))
   })
 })

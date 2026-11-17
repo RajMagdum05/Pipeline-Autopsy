@@ -7,7 +7,7 @@ from app.information_extraction.schemas import Classification, EvidenceQuote, Ex
 
 def test_classification_preserves_declared_type_and_detects_mismatch(monkeypatch):
     service = DocumentContentService()
-    service._request = lambda prompt, schema: Classification(detected_type="hospital_bill",
+    service._request = lambda prompt, schema, **_metadata: Classification(detected_type="hospital_bill",
         subtype="invoice", disposition="accepted", evidence=[EvidenceQuote(page_number=1, quote="CITY HOSPITAL INVOICE")])
     result, metadata = service.classify([{"page_number": 1, "text": "CITY HOSPITAL INVOICE 123"}], "policy_document")
     assert result.disposition == "mismatch"
@@ -17,7 +17,7 @@ def test_classification_preserves_declared_type_and_detects_mismatch(monkeypatch
 
 def test_hallucinated_quote_and_page_reference_require_review():
     service = DocumentContentService()
-    service._request = lambda prompt, schema: Classification(detected_type="medical_report",
+    service._request = lambda prompt, schema, **_metadata: Classification(detected_type="medical_report",
         subtype="investigation", disposition="accepted", evidence=[EvidenceQuote(page_number=2, quote="NOT IN SOURCE")])
     result, metadata = service.classify([{"page_number": 1, "text": "LAB RESULT"}], "medical_report")
     assert result.disposition == "review_required"
@@ -26,7 +26,7 @@ def test_hallucinated_quote_and_page_reference_require_review():
 
 def test_unrelated_material_is_not_accepted_as_other():
     service = DocumentContentService()
-    service._request = lambda prompt, schema: Classification(detected_type="unknown", disposition="review_required",
+    service._request = lambda prompt, schema, **_metadata: Classification(detected_type="unknown", disposition="review_required",
         reasons=["Unrelated material."])
     result, _ = service.classify([{"page_number": 1, "text": "A personal greeting card"}], "other_supporting_document")
     assert result.detected_type == "unknown"
@@ -52,7 +52,7 @@ def test_document_text_is_json_quoted_to_prevent_forged_page_delimiters():
 
 def test_missing_fields_are_materialized_and_conflicts_preserved(monkeypatch):
     service = DocumentContentService()
-    def request(prompt, schema):
+    def request(prompt, schema, **_metadata):
         return schema(subtype="invoice", facts=[ExtractedFact(field_name="total", raw_value="100",
             normalized_value="100.00", field_status="found", evidence=[{"page_number": 1, "quote": "Total 100"}])])
     service._request = request
@@ -74,7 +74,7 @@ def test_each_type_runs_its_own_schema_and_preserves_medical_numeric_values():
     service = DocumentContentService()
     for kind, schema in EXTRACTION_SCHEMAS.items():
         field = "value" if kind == "medical_report" else sorted(ALLOWED_FIELDS[kind])[0]
-        def request(prompt, response_schema, field=field, schema=schema):
+        def request(prompt, response_schema, field=field, schema=schema, **_metadata):
             return schema(subtype="synthetic", facts=[ExtractedFact(field_name=field, raw_value="6.5 mg/dL",
                 normalized_value="6.5 mg/dL", field_status="found", evidence=[{"page_number": 1, "quote": "6.5 mg/dL"}])])
         service._request = request
@@ -97,7 +97,7 @@ def test_each_supported_type_selects_its_own_prompt_and_schema():
     }
     for document_type, (subtype, specific_instruction) in cases.items():
         captured = {}
-        def request(prompt, response_schema):
+        def request(prompt, response_schema, **_metadata):
             captured["prompt"] = prompt
             captured["schema"] = response_schema
             return response_schema(subtype=subtype, facts=[])
@@ -115,7 +115,7 @@ def test_policy_subtype_schema_is_selected_and_versioned_in_response():
     from app.information_extraction.schemas import PolicyWordingExtraction, ExtractedFact
     service = DocumentContentService()
     captured = {}
-    def request(prompt, schema):
+    def request(prompt, schema, **_metadata):
         captured["schema"] = schema
         return schema(subtype="policy wording", facts=[ExtractedFact(field_name="product_name", raw_value="Policy wording",
             field_status="found", evidence=[{"page_number": 1, "quote": "Policy wording"}])])
@@ -128,7 +128,7 @@ def test_policy_subtype_schema_is_selected_and_versioned_in_response():
 
 def test_other_supporting_document_without_meaningful_subtype_requires_review():
     service = DocumentContentService()
-    service._request = lambda prompt, schema: schema(subtype="unknown", facts=[])
+    service._request = lambda prompt, schema, **_metadata: schema(subtype="unknown", facts=[])
     _, validation = service.extract([{"page_number": 1, "text": "Unclassified source text"}], "other_supporting_document", "unknown")
     assert validation["status"] == "review_required"
     assert any("meaningful classified subtype" in reason for reason in validation["reasons"])
@@ -137,7 +137,7 @@ def test_other_supporting_document_without_meaningful_subtype_requires_review():
 def test_raw_fact_value_must_appear_in_its_supported_evidence():
     from app.information_extraction.schemas import HospitalBillExtraction
     service = DocumentContentService()
-    service._request = lambda prompt, schema: HospitalBillExtraction(subtype="invoice", facts=[ExtractedFact(
+    service._request = lambda prompt, schema, **_metadata: HospitalBillExtraction(subtype="invoice", facts=[ExtractedFact(
         field_name="total", raw_value="999.00", normalized_value="999.00", field_status="found",
         evidence=[{"page_number": 1, "quote": "Total 100.00"}])])
     _, validation = service.extract([{"page_number": 1, "text": "Total 100.00"}], "hospital_bill", "invoice")
@@ -149,7 +149,7 @@ def test_two_same_type_documents_are_sent_in_independent_requests():
     from app.information_extraction.schemas import HospitalBillExtraction
     service = DocumentContentService()
     prompts = []
-    def request(prompt, schema):
+    def request(prompt, schema, **_metadata):
         prompts.append(prompt)
         marker = "BILL-A" if "BILL-A" in prompt else "BILL-B"
         return HospitalBillExtraction(subtype="invoice", facts=[ExtractedFact(field_name="invoice_number",
@@ -168,7 +168,7 @@ def test_conflicting_single_value_facts_are_flagged_without_precedence():
     from app.information_extraction.schemas import HospitalBillExtraction
     service = DocumentContentService()
     service.max_pages = 1
-    def request(prompt, schema):
+    def request(prompt, schema, **_metadata):
         quote = "Total 100" if '"page_number": 1' in prompt else "Total 120"
         amount = "100" if '"page_number": 1' in prompt else "120"
         return HospitalBillExtraction(subtype="invoice", facts=[ExtractedFact(field_name="total",
@@ -183,7 +183,7 @@ def test_conflicting_single_value_facts_are_flagged_without_precedence():
 
 def test_inconsistent_missing_field_state_requires_review():
     service = DocumentContentService()
-    service._request = lambda prompt, schema: schema(subtype="invoice", facts=[ExtractedFact(
+    service._request = lambda prompt, schema, **_metadata: schema(subtype="invoice", facts=[ExtractedFact(
         field_name="total", raw_value="100", normalized_value=None, field_status="missing")])
     _, validation = service.extract([{"page_number": 1, "text": "Total 100"}], "hospital_bill", "invoice")
     assert validation["status"] == "review_required"
@@ -193,7 +193,7 @@ def test_inconsistent_missing_field_state_requires_review():
 def test_ambiguous_date_and_raw_normalized_amount_mismatch_require_review():
     from app.information_extraction.schemas import HospitalBillExtraction
     service = DocumentContentService()
-    service._request = lambda prompt, schema: HospitalBillExtraction(subtype="invoice", facts=[
+    service._request = lambda prompt, schema, **_metadata: HospitalBillExtraction(subtype="invoice", facts=[
         ExtractedFact(field_name="invoice_date", raw_value="03/04/2025", normalized_value="2025-03-04",
             field_status="found", evidence=[{"page_number": 1, "quote": "Date 03/04/2025"}]),
         ExtractedFact(field_name="total", raw_value="100", normalized_value="101.00",
@@ -208,7 +208,7 @@ def test_ambiguous_date_and_raw_normalized_amount_mismatch_require_review():
 def test_policy_date_ordering_is_checked_without_rewriting_values():
     from app.information_extraction.schemas import PolicyExtraction
     service = DocumentContentService()
-    service._request = lambda prompt, schema: PolicyExtraction(subtype="policy wording", facts=[
+    service._request = lambda prompt, schema, **_metadata: PolicyExtraction(subtype="policy wording", facts=[
         ExtractedFact(field_name="coverage_start", raw_value="2025-06-01", normalized_value="2025-06-01",
             field_status="found", evidence=[{"page_number": 1, "quote": "Start 2025-06-01"}]),
         ExtractedFact(field_name="coverage_end", raw_value="2025-05-01", normalized_value="2025-05-01",
@@ -223,7 +223,7 @@ def test_policy_date_ordering_is_checked_without_rewriting_values():
 def test_bill_arithmetic_requires_explicit_currency_and_respects_tolerance(monkeypatch):
     from app.information_extraction.schemas import HospitalBillExtraction
     service = DocumentContentService()
-    def request(prompt, schema):
+    def request(prompt, schema, **_metadata):
         facts = [
             ExtractedFact(field_name="subtotal", raw_value="100.00", normalized_value="100.00", field_status="found", evidence=[{"page_number": 1, "quote": "Subtotal 100.00"}]),
             ExtractedFact(field_name="taxes", raw_value="5.005", normalized_value="5.005", field_status="found", evidence=[{"page_number": 1, "quote": "Tax 5.005"}]),
@@ -239,7 +239,7 @@ def test_bill_arithmetic_requires_explicit_currency_and_respects_tolerance(monke
     assert validation["status"] == "passed"
     assert not any("reconcile" in warning for warning in validation["consistency_warnings"])
 
-    service._request = lambda prompt, schema: HospitalBillExtraction(subtype="invoice", facts=[
+    service._request = lambda prompt, schema, **_metadata: HospitalBillExtraction(subtype="invoice", facts=[
         ExtractedFact(field_name="subtotal", raw_value="100", normalized_value="100", field_status="found", evidence=[{"page_number": 1, "quote": "Subtotal 100"}]),
         ExtractedFact(field_name="taxes", raw_value="5", normalized_value="5", field_status="found", evidence=[{"page_number": 1, "quote": "Tax 5"}]),
         ExtractedFact(field_name="total", raw_value="105", normalized_value="105", field_status="found", evidence=[{"page_number": 1, "quote": "Total 105"}]),
@@ -285,7 +285,7 @@ def test_gemini_schema_adapter_removes_unsupported_additional_properties_but_kee
 
 def test_empty_semantic_extraction_is_review_required_not_accepted():
     service = DocumentContentService()
-    service._request = lambda prompt, schema: schema(subtype="invoice", facts=[])
+    service._request = lambda prompt, schema, **_metadata: schema(subtype="invoice", facts=[])
     _, validation = service.extract([{"page_number": 1, "text": "Hospital Invoice Total INR 100"}], "hospital_bill", "invoice")
     assert validation["status"] == "review_required"
     assert any("No source-backed information" in reason for reason in validation["reasons"])

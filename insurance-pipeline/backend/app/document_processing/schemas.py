@@ -46,6 +46,7 @@ class ProcessDocumentRequest(BaseModel):
 
 class ProcessClaimRequest(BaseModel):
     config_version: str = Field(default="intake-v1", min_length=1, max_length=64)
+    fault: str | None = Field(default=None, max_length=64)
 
 
 class ProcessClaimResponse(BaseModel):

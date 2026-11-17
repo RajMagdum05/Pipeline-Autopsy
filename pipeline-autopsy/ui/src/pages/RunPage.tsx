@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { getDiagnosis, getExecution, getExecutionGraph, getExecutionSpans, getPipelines, requeueDiagnosis } from '../api'
+import { getDiagnosis, getExecution, getExecutionGraph, getExecutionSpans, getPipelines, requeueDiagnosis, submitFindingFeedback } from '../api'
 import { EvidencePane, findStageFinding } from '../components/EvidencePane'
 import { FindingsList } from '../components/FindingsList'
 import { Graph } from '../components/Graph'
@@ -110,6 +110,15 @@ export function RunPage() {
     }
   }
 
+  async function handleFeedback(findingId: string, verdict: 'confirmed' | 'rejected', comment: string) {
+    try {
+      await submitFindingFeedback(findingId, verdict, comment)
+      await loadDiagnosis()
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not save finding feedback')
+    }
+  }
+
   return (
     <main className="page run-page">
       <Link className="back-link" to="/">← All runs</Link>
@@ -153,6 +162,14 @@ export function RunPage() {
           <section className="summary-card">
             <div className="summary-card__source">{readyDiagnosis.explanation?.source || 'template'} explanation</div>
             <p>{readyDiagnosis.explanation?.summary || 'Diagnosis is complete. Select a finding or graph stage to inspect its evidence.'}</p>
+            {(readyDiagnosis.explanation?.narrative || []).length > 0 && <ul className="explanation-narrative">
+              {readyDiagnosis.explanation?.narrative.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}
+            </ul>}
+            {(readyDiagnosis.explanation?.remediation || []).length > 0 && <div className="remediation-list">
+              {readyDiagnosis.explanation?.remediation.map((item) => <article key={item.playbook_id || item.title}>
+                <h3>{item.title}{item.pack && item.pack !== 'generic' ? ` · ${item.pack}` : ''}</h3><p>{item.body}</p>
+              </article>)}
+            </div>}
             {readyDiagnosis.findings.filter((finding) => finding.role === 'origin').map((finding) => (
               <button type="button" className="summary-origin" key={finding.id} onClick={() => setSelectedStage(finding.item_id ? `${finding.stage}@${finding.item_id}` : finding.stage)}>
                 <span className="role-tag role-tag--origin">origin</span><strong>{finding.item_id ? `${finding.stage}@${finding.item_id}` : finding.stage}</strong>
@@ -168,7 +185,8 @@ export function RunPage() {
           </section>
 
           <div className="investigation-columns">
-            <FindingsList findings={readyDiagnosis.findings} selectedStage={selectedStage} onSelect={setSelectedStage} />
+            <FindingsList findings={readyDiagnosis.findings} selectedStage={selectedStage} onSelect={setSelectedStage}
+              onFeedback={handleFeedback} />
             <EvidencePane stageId={selectedStage} finding={selectedFinding} observations={readyDiagnosis.observations}
               spans={spans} evidenceLevel={evidenceLevel} />
           </div>

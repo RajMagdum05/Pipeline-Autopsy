@@ -6,8 +6,11 @@ from datetime import datetime, timezone
 
 from autopsy.core.fanout import diagnose
 from autopsy.core_adapter import build_core_inputs, missing_referenced_artifacts
+from autopsy.explain.bundle import build_bundle
+from autopsy.explain.template import build_template
+from autopsy.knowledge.playbooks import retrieve
 from autopsy.db.models import (
-    DiagnosisJobRecord, ExecutionRecord, FindingRecord,
+    DiagnosisJobRecord, ExecutionRecord, ExplanationRecord, FindingRecord,
     ObservationRecord, PipelineRecord,
 )
 
@@ -53,7 +56,7 @@ def schedule_diagnosis(db, execution, *, has_run_span, last_span_at, now=None):
     execution.status = "queued"
 
 
-def _persist_result(db, execution, job, result, now):
+def _persist_result(db, execution, job, result, now, *, artifacts=None, evidence_level="E1", spans=None):
     db.query(ObservationRecord).filter_by(execution_id=execution.id).delete(synchronize_session=False)
     db.query(FindingRecord).filter_by(execution_id=execution.id).delete(synchronize_session=False)
 
@@ -95,6 +98,23 @@ def _persist_result(db, execution, job, result, now):
             signature=_signature(execution.pipeline, stage, finding.get("classification"),
                                  finding.get("evidence", []), observation_index),
         ))
+
+    bundle = build_bundle(result, artifacts or {}, evidence_level=evidence_level)
+    bundle["remediation"] = retrieve(db, bundle["findings"], spans or [])
+    explanation = build_template(bundle)
+    explanation_row = db.get(ExplanationRecord, execution.id)
+    if explanation_row is None:
+        explanation_row = ExplanationRecord(execution_id=execution.id)
+        db.add(explanation_row)
+    explanation_row.source = explanation["source"]
+    explanation_row.summary = explanation["summary"]
+    explanation_row.narrative = explanation["narrative"]
+    explanation_row.remediation = explanation["remediation"]
+    explanation_row.guardrail_log = []
+    explanation_row.model = None
+    explanation_row.tokens_in = None
+    explanation_row.tokens_out = None
+    explanation_row.latency_ms = None
 
     execution.verdict = result.get("verdict")
     execution.trace_grade = result.get("trace_grade")
@@ -161,7 +181,11 @@ def process_due_jobs(session_factory, *, now=None, settle_seconds=None, incomple
                     db.commit()
                     continue
                 result = diagnose(spans, artifacts, manifest, items if items else None)
-                _persist_result(db, execution, job, result, now)
+                _persist_result(
+                    db, execution, job, result, now,
+                    artifacts=artifacts, evidence_level=pipeline.evidence_level or "E1",
+                    spans=spans,
+                )
             except Exception:
                 db.rollback()
                 current_job = db.get(DiagnosisJobRecord, job.execution_id)

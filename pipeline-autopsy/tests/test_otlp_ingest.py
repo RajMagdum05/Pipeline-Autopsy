@@ -220,11 +220,11 @@ def test_database_lifespan_fails_clearly_when_unreachable(monkeypatch):
 def test_schema_migration_applies_once_and_creates_core_tables():
     test_engine = create_engine("sqlite:///:memory:")
     try:
-        assert migrate(test_engine) == ["001", "002"]
+        assert migrate(test_engine) == ["001", "002", "003", "004"]
         assert migrate(test_engine) == []
         table_names = set(inspect(test_engine).get_table_names())
         assert {"schema_migrations", "projects", "pipelines", "executions", "spans", "artifacts",
-                "diagnosis_jobs", "observations", "findings", "explanations"} <= table_names
+                "diagnosis_jobs", "observations", "findings", "explanations", "playbooks", "feedback"} <= table_names
         span_columns = {column["name"] for column in inspect(test_engine).get_columns("spans")}
         assert {"role", "stage_name", "item_id", "attempt", "status", "status_message", "error_type",
                 "error_class", "dropped_attributes", "dropped_events"} <= span_columns
@@ -234,6 +234,6 @@ def test_schema_migration_applies_once_and_creates_core_tables():
         assert not {"autopsy_pipelines", "autopsy_executions", "autopsy_traces", "autopsy_spans",
                     "autopsy_events", "autopsy_evidence", "autopsy_failures", "autopsy_incidents"} & table_names
         with test_engine.connect() as connection:
-            assert connection.execute(text("SELECT COUNT(*) FROM schema_migrations")).scalar_one() == 2
+            assert connection.execute(text("SELECT COUNT(*) FROM schema_migrations")).scalar_one() == 4
     finally:
         test_engine.dispose()

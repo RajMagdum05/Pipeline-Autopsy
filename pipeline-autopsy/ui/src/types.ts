@@ -87,6 +87,9 @@ export type Finding = {
   caused_by: string[]
   evidence: string[]
   note: string | null
+  seen_before?: number
+  seen_before_last_at?: string | null
+  feedback?: { verdict: 'confirmed' | 'rejected'; comment: string | null; created_at: string } | null
 }
 
 export type Diagnosis = {
@@ -98,7 +101,7 @@ export type Diagnosis = {
   trace_grade: string | null
   findings: Finding[]
   observations: Observation[]
-  explanation: { source: string; summary: string; narrative: string[]; remediation: string[] } | null
+  explanation: { source: string; summary: string; narrative: string[]; remediation: Array<{ playbook_id: string | null; title: string; body: string; pack: string | null; score: number }> } | null
 }
 
 export type NormalizedSpan = {

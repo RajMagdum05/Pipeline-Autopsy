@@ -91,6 +91,9 @@ def _error_class(exc, overrides=None):
                     return classification
             except TypeError:
                 continue
+    declared_class = getattr(exc, "error_class", None)
+    if declared_class in {"infra", "data", "unknown"}:
+        return declared_class
     name = type(exc).__name__
     module = type(exc).__module__
     status = getattr(exc, "status_code", None)
@@ -210,6 +213,17 @@ class RunContext:
             raise AutopsyUsageError(f"Invalid run outcome: {outcome!r}")
         self._outcome = outcome
 
+    def set_run_id(self, run_id):
+        """Replace a provisional ID with the durable host-system run ID."""
+        if run_id is None or not str(run_id).strip():
+            raise AutopsyUsageError("Run ID must be a non-empty value")
+        self.run_id = str(run_id)
+        _safe("update durable run id", self.raw_span.set_attribute, "pipeline.run.id", self.run_id)
+
+    def set_attribute(self, key, value):
+        """Set a pipeline-scoped attribute on the run span."""
+        if str(key).startswith("pipeline."):
+            _safe("set run attribute", self.raw_span.set_attribute, str(key), value)
 
 @contextmanager
 def run(entity_id=None, items=None, run_id=None, trigger="api", previous_run_id=None):
@@ -274,6 +288,11 @@ class StageContext:
         self._outputs = []
         self._inputs = []
 
+    def set_attribute(self, key, value):
+        """Set a contract-approved attribute on this stage span."""
+        if str(key).startswith(("pipeline.", "error.")):
+            _safe("set stage attribute", self.raw_span.set_attribute, str(key), value)
+
     def set_status(self, status):
         if status not in _VALID_STAGE_STATUSES:
             raise AutopsyUsageError(f"Invalid stage status: {status!r}")
@@ -285,11 +304,26 @@ class StageContext:
             _safe("update stage input ids", self.raw_span.set_attribute, "pipeline.artifact.input_ids",
                   list(self._inputs))
 
-    def record_artifact(self, kind, content, item_id=None, excerpt_values=None):
+    def record_artifact(self, kind, content, item_id=None, excerpt_values=None,
+                        upload_content=None, upload_redaction=None):
         artifact = artifact_id(kind, content, self.item_id if item_id is None else item_id)
         self._outputs.append(artifact)
         _safe("update stage output ids", self.raw_span.set_attribute, "pipeline.artifact.output_ids",
               list(self._outputs))
+        self._enqueue_evidence(kind, artifact, item_id, content, excerpt_values,
+                               upload_content, upload_redaction)
+        return artifact
+
+    def upload_evidence(self, kind, content, item_id=None, excerpt_values=None,
+                        upload_content=None, upload_redaction=None, stage_name=None):
+        """Upload redacted evidence for an already-recorded artifact without adding a stage output."""
+        artifact = artifact_id(kind, content, self.item_id if item_id is None else item_id)
+        self._enqueue_evidence(kind, artifact, item_id, content, excerpt_values,
+                               upload_content, upload_redaction, stage_name)
+        return artifact
+
+    def _enqueue_evidence(self, kind, artifact, item_id, content, excerpt_values,
+                          upload_content, upload_redaction, stage_name=None):
         uploader = _ARTIFACT_UPLOADER
         run_state = _RUN.get()
         if uploader is not None and run_state is not None:
@@ -298,11 +332,16 @@ class StageContext:
                 "execution_id": run_state.run_id,
                 "pipeline": run_state.pipeline_name,
                 "version": run_state.pipeline_version,
-                "stage": self.name,
+                "stage": stage_name or self.name,
                 "item_id": self.item_id if item_id is None else item_id,
             }
-            _safe("enqueue artifact", uploader.enqueue, kind, content, metadata, excerpt_values)
-        return artifact
+            # page_text has no useful evidence until extraction supplies values
+            # to select the relevant source lines. Keep its ID in the trace now,
+            # then enqueue the redacted excerpt when those values are known.
+            if kind != "page_text" or excerpt_values:
+                upload_payload = content if upload_content is None else upload_content
+                _safe("enqueue artifact", uploader.enqueue, kind, upload_payload,
+                      metadata, excerpt_values, upload_redaction)
 
     def check(self, check_id, kind, result, action, target=None, field=None, observed=None, expected=None):
         return check(check_id, kind, result, action, target, field, observed, expected)

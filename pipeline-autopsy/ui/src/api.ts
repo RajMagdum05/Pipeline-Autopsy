@@ -90,3 +90,14 @@ export async function requeueDiagnosis(executionId: string): Promise<void> {
     throw new Error(body.detail || body.status || `${response.status} ${response.statusText}`)
   }
 }
+
+export async function submitFindingFeedback(findingId: string, verdict: 'confirmed' | 'rejected', comment?: string): Promise<void> {
+  const response = await fetch(`/v1/findings/${encodeURIComponent(findingId)}/feedback`, {
+    method: 'POST', headers: { ...requestHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verdict, comment: comment?.trim() || null }),
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { detail?: string }
+    throw new Error(body.detail || `${response.status} ${response.statusText}`)
+  }
+}

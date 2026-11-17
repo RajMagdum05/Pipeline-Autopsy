@@ -1,6 +1,12 @@
 class DocumentProcessingError(Exception):
     """Base exception for all document processing and OCR errors."""
-    pass
+
+    def __init__(self, message: str, *, error_class: str = "data", code: str | None = None):
+        if error_class not in {"infra", "data", "unknown"}:
+            raise ValueError("error_class must be infra, data, or unknown")
+        super().__init__(message)
+        self.error_class = error_class
+        self.code = code
 
 
 class DocumentNotFoundError(DocumentProcessingError):

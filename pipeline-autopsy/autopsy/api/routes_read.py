@@ -4,10 +4,12 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import or_, text
+from pydantic import BaseModel, Field
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 from autopsy.api.auth import extract_project_id, verify_api_key
@@ -15,12 +17,17 @@ from autopsy.core.normalize import normalize
 from autopsy.db.database import get_db
 from autopsy.db.models import (
     ArtifactRecord, DiagnosisJobRecord, ExecutionRecord, ExplanationRecord,
-    FindingRecord, ObservationRecord, PipelineRecord, SpanRecord,
+    FeedbackRecord, FindingRecord, ObservationRecord, PipelineRecord, SpanRecord,
 )
 
 
 router = APIRouter(dependencies=[Depends(verify_api_key)])
 health_router = APIRouter()
+
+
+class FeedbackRequest(BaseModel):
+    verdict: Literal["confirmed", "rejected"]
+    comment: str | None = Field(default=None, max_length=1000)
 
 
 def _project_id(request):
@@ -247,10 +254,11 @@ def get_execution_diagnosis(execution_id: str, request: Request, db: Session = D
         "verdict": execution.verdict,
         "trace_grade": execution.trace_grade,
         "findings": [{
+            **_finding_history(db, execution, row),
             "id": row.id, "stage": row.stage, "item_id": row.item_id, "role": row.role,
             "classification": row.classification, "confidence": row.confidence, "severity": row.severity,
             "link": row.link, "caused_by": row.caused_by or [], "evidence": row.evidence or [],
-            "note": row.note, "seen_before": 0,
+            "note": row.note,
         } for row in findings],
         "observations": [{
             "id": row.id, "family": row.family, "code": row.code, "result": row.result,
@@ -261,6 +269,47 @@ def get_execution_diagnosis(execution_id: str, request: Request, db: Session = D
                          "narrative": explanation.narrative or [], "remediation": explanation.remediation or []}
                         if explanation else None),
     }
+
+
+def _finding_history(db, execution, finding):
+    latest = (db.query(FeedbackRecord).filter_by(finding_id=finding.id)
+              .order_by(FeedbackRecord.created_at.desc()).first())
+    seen_before, last_seen = 0, None
+    if finding.signature:
+        seen_before, last_seen = db.query(
+            func.count(func.distinct(ExecutionRecord.id)), func.max(FeedbackRecord.created_at)
+        ).join(FindingRecord, FindingRecord.id == FeedbackRecord.finding_id
+        ).join(ExecutionRecord, ExecutionRecord.id == FindingRecord.execution_id
+        ).filter(FindingRecord.signature == finding.signature,
+                 FeedbackRecord.verdict == "confirmed",
+                 ExecutionRecord.id != execution.id).one()
+    return {"seen_before": int(seen_before or 0),
+            "seen_before_last_at": last_seen.isoformat() if last_seen else None,
+            "feedback": ({"verdict": latest.verdict, "comment": latest.comment,
+                          "created_at": latest.created_at.isoformat()} if latest else None)}
+
+
+@router.post("/v1/findings/{finding_id}/feedback", status_code=status.HTTP_201_CREATED, tags=["Findings"])
+def submit_finding_feedback(finding_id: str, payload: FeedbackRequest, request: Request,
+                            db: Session = Depends(get_db)):
+    project_id = _project_id(request)
+    finding = (db.query(FindingRecord).join(ExecutionRecord, ExecutionRecord.id == FindingRecord.execution_id)
+               .filter(FindingRecord.id == finding_id, ExecutionRecord.project_id == project_id)
+               .one_or_none())
+    if finding is None:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    latest = (db.query(FeedbackRecord).filter_by(finding_id=finding.id)
+              .order_by(FeedbackRecord.created_at.desc()).first())
+    now = datetime.now(timezone.utc)
+    if latest is None:
+        latest = FeedbackRecord(finding_id=finding.id)
+        db.add(latest)
+    latest.verdict = payload.verdict
+    latest.comment = payload.comment
+    latest.created_at = now
+    db.commit()
+    return {"finding_id": finding.id, "verdict": latest.verdict, "comment": latest.comment,
+            "created_at": latest.created_at.isoformat()}
 
 
 @router.get("/v1/executions/{execution_id}/spans", tags=["Executions"])

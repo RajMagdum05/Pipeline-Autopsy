@@ -5,8 +5,10 @@ from decimal import Decimal
 import hashlib
 import json
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import autopsy_sdk as autopsy
+from app import faults
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -104,8 +106,37 @@ class ClaimRunService:
     def __init__(self, document_service=claim_document_processing_service):
         self.document_service = document_service
 
-    def process_claim(self, db: Session, claim_id: str, config_version: str) -> ClaimRunResponse:
-        processing: ProcessClaimResponse = self.document_service.process_claim(db, claim_id, config_version)
+    def process_claim(self, db: Session, claim_id: str, config_version: str,
+                      *, fault: str | None = None) -> ClaimRunResponse:
+        claim = db.query(IntakeClaim).filter_by(claim_id=claim_id).one_or_none()
+        if claim is None:
+            processing = self.document_service.process_claim(db, claim_id, config_version)
+            return self._process_claim_result(db, claim_id, processing)
+        documents = db.query(ClaimDocument).filter_by(claim_id=claim_id).order_by(ClaimDocument.document_slot).all()
+        items = {
+            str(document.id): "policy" if document.document_type == "policy_document" else "proof"
+            for document in documents
+        }
+        provisional_run_id = uuid4()
+        with autopsy.run(entity_id=claim.id, run_id=provisional_run_id, items=items, trigger="api") as trace_run:
+            if fault:
+                trace_run.set_attribute("pipeline.fault.name", fault)
+            processing = self.document_service.process_claim(
+                db, claim_id,
+                f"{config_version}|fault={fault}" if fault else config_version,
+                run_id=provisional_run_id,
+            )
+            if processing.run_id:
+                trace_run.set_run_id(processing.run_id)
+            response = self._process_claim_result(db, claim_id, processing)
+            outcome = {
+                "COMPLETED": "success", "PARTIAL": "partial", "BLOCKED": "blocked",
+                "FAILED": "failed", "REVIEW_REQUIRED": "partial",
+            }.get(response.status, "failed")
+            trace_run.set_outcome(outcome)
+            return response
+
+    def _process_claim_result(self, db: Session, claim_id: str, processing: ProcessClaimResponse) -> ClaimRunResponse:
         if not processing.run_id:
             return ClaimRunResponse(
                 run_id="", claim_id=claim_id, status=processing.status,
@@ -142,8 +173,9 @@ class ClaimRunService:
             if stored.inputs_checksum != checksum:
                 raise AdjudicationReplayConflict("The run already has a decision for different inputs; use a new config_version.")
             decision = _stored_decision(stored)
-            apply_final_result(db, claim, decision, run_id=processing.run_id)
-            return self._response(processing, processing.status, decision=decision)
+            final_decision = faults.after_adjudication(decision)
+            apply_final_result(db, claim, final_decision, run_id=processing.run_id)
+            return self._response(processing, processing.status, decision=final_decision)
 
         try:
             decision = adjudicate_claim(claim_form, policy, proofs)
@@ -164,8 +196,9 @@ class ClaimRunService:
             if stored is None or stored.inputs_checksum != checksum:
                 raise AdjudicationReplayConflict("The run already has a decision for different inputs; use a new config_version.")
             decision = _stored_decision(stored)
-        apply_final_result(db, claim, decision, run_id=processing.run_id)
-        return self._response(processing, processing.status, decision=decision)
+        final_decision = faults.after_adjudication(decision)
+        apply_final_result(db, claim, final_decision, run_id=processing.run_id)
+        return self._response(processing, processing.status, decision=final_decision)
 
     @staticmethod
     def _has_accepted_policy(db: Session, run: ProcessingRun, claim: IntakeClaim) -> bool:

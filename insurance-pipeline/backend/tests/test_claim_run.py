@@ -6,6 +6,7 @@ from hashlib import sha256
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from autopsy_sdk.testing import InMemoryCapture, assert_contract
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -101,9 +102,9 @@ def setup(tmp_path, monkeypatch, *, run_status="PARTIAL", policy_accepted=True, 
     monkeypatch.setattr("app.main.init_db", lambda: None)
 
     class ReusedProcessingService:
-        def process_claim(self, db, requested_claim_id, config_version):
+        def process_claim(self, db, requested_claim_id, config_version, **kwargs):
             assert requested_claim_id == claim_id
-            assert config_version == "test-config"
+            assert config_version.startswith("test-config")
             return ProcessClaimResponse(run_id=str(run_id), claim_id=claim_id, status=run_status)
 
     monkeypatch.setattr(claim_run_service, "document_service", ReusedProcessingService())
@@ -133,10 +134,32 @@ def post_process(client, claim_id):
                        headers={"Authorization": f"Bearer {TOKEN}"})
 
 
+def test_fault_header_is_recorded_only_on_run_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAULT_INJECTION_ENABLED", "true")
+    client, factory, engine, claim_id = setup(tmp_path, monkeypatch, run_status="PARTIAL")
+    try:
+        with InMemoryCapture() as capture:
+            response = client.post(
+                f"/claims/{claim_id}/process", json={"config_version": "test-config"},
+                headers={"Authorization": f"Bearer {TOKEN}",
+                         "X-Autopsy-Fault": "ocr_misread_bill_date"},
+            )
+        assert response.status_code == 200, response.text
+        execution = next(span for span in capture.spans
+                         if span.attributes.get("pipeline.span.role") == "execution")
+        assert execution.attributes["pipeline.fault.name"] == "ocr_misread_bill_date"
+        assert all("pipeline.fault.name" not in span.attributes for span in capture.spans
+                   if span is not execution)
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
 def test_full_claim_run_adjudicates_accepted_partial_run(tmp_path, monkeypatch):
     client, factory, engine, claim_id = setup(tmp_path, monkeypatch, run_status="PARTIAL")
     try:
-        response = post_process(client, claim_id)
+        with InMemoryCapture() as capture:
+            response = post_process(client, claim_id)
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["status"] == "PARTIAL"
@@ -152,6 +175,20 @@ def test_full_claim_run_adjudicates_accepted_partial_run(tmp_path, monkeypatch):
         assert final.status_code == 200, final.text
         assert final.json()["decision"] == "APPROVED"
         assert final.json()["run_id"] == body["run_id"]
+        spans = capture.spans
+        assert len(spans) == 1
+        run_span = spans[0]
+        assert run_span.attributes["pipeline.run.id"] == body["run_id"]
+        assert run_span.attributes["pipeline.run.outcome"] == "partial"
+        pii_values = ("Asha Rao", "POL-101", "100.00", "150.00")
+        exported_values = [repr(value) for value in run_span.attributes.values()]
+        exported_values.extend(
+            repr(value)
+            for event in run_span.events
+            for value in event.attributes.values()
+        )
+        for pii in pii_values:
+            assert all(pii not in value for value in exported_values)
     finally:
         app.dependency_overrides.clear()
         engine.dispose()
@@ -180,10 +217,16 @@ def test_out_of_coverage_bill_is_rejected(tmp_path, monkeypatch):
 def test_blocked_policy_never_creates_adjudication_result(tmp_path, monkeypatch):
     client, factory, engine, claim_id = setup(tmp_path, monkeypatch, run_status="REVIEW_REQUIRED", policy_accepted=False)
     try:
-        response = post_process(client, claim_id)
+        with InMemoryCapture() as capture:
+            response = post_process(client, claim_id)
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "BLOCKED"
         assert response.json()["decision"] is None
+        spans = capture.spans
+        assert len(spans) == 1
+        assert "proof" in spans[0].attributes["pipeline.run.items"][1]
+        assert all("pipeline.span.role" not in span.attributes or span.attributes["pipeline.span.role"] != "stage"
+                   for span in spans)
         final = client.get(f"/claims/{claim_id}/result", headers={"Authorization": f"Bearer {TOKEN}"})
         assert final.status_code == 409
         with factory() as db:
@@ -220,11 +263,12 @@ def test_full_claim_run_requires_owner_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "bill_offset_days,expected_decision,expected_rule",
-    [(0, "APPROVED", "pass"), (-40, "REJECTED", "fail")],
+    "bill_offset_days,expected_decision,expected_rule,force_retry,block_policy",
+    [(0, "APPROVED", "pass", False, False), (-40, "REJECTED", "fail", False, False),
+     (0, None, None, True, False), (0, None, None, False, True)],
 )
 def test_claim_run_executes_document_pipeline_with_mocked_gemini(
-    tmp_path, monkeypatch, bill_offset_days, expected_decision, expected_rule,
+    tmp_path, monkeypatch, bill_offset_days, expected_decision, expected_rule, force_retry, block_policy,
 ):
     """Exercise the real PDF/OCR/persistence path while stubbing Gemini responses."""
     import pymupdf
@@ -291,6 +335,17 @@ def test_claim_run_executes_document_pipeline_with_mocked_gemini(
     monkeypatch.setattr("app.main.init_db", lambda: None)
 
     processor = ClaimDocumentProcessingService()
+    if force_retry:
+        # Keep policy quality normal and apply a deterministic high threshold only
+        # to the shorter bill so the real retry path runs twice for that document.
+        validate_file = processor._validate_file
+
+        def validate_with_bill_retry(item):
+            if item[3] != "policy_document":
+                processor.quality_config.min_character_count = 250
+            return validate_file(item)
+
+        processor._validate_file = validate_with_bill_retry
 
     def mock_gemini_and_persist(db, processed, normalized, *, declared_type, checksum):
         values = (
@@ -321,20 +376,56 @@ def test_claim_run_executes_document_pipeline_with_mocked_gemini(
                 prompt_version="mock-validation", schema_version="mock-v1"),
         ])
         db.flush()
-        return "accepted"
+        return "content_mismatch" if block_policy and declared_type == "policy_document" else "accepted"
 
     processor.content_service.process_and_persist = mock_gemini_and_persist
     monkeypatch.setattr(claim_run_service, "document_service", processor)
     try:
         client = TestClient(app)
-        response = client.post(f"/claims/{claim_id}/process", json={"config_version": "mocked-gemini"},
-            headers={"Authorization": f"Bearer {TOKEN}"})
+        with InMemoryCapture() as capture:
+            response = client.post(f"/claims/{claim_id}/process", json={"config_version": "mocked-gemini"},
+                headers={"Authorization": f"Bearer {TOKEN}"})
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["status"] == "COMPLETED", body
-        assert body["decision"]["decision"] == expected_decision
-        service_rule = next(row for row in body["decision"]["rules"] if row["rule_id"] == "rule.service_in_coverage")
-        assert service_rule["result"] == expected_rule
+        spans = capture.spans
+        assert spans and any(span.attributes.get("pipeline.span.role") == "execution" for span in spans)
+        manifest = {"stages": [{"name": "document_processing", "scope": "item"}]}
+        assert assert_contract(spans, manifest) == "A"
+        document_stages = [span for span in spans if span.attributes.get("pipeline.span.role") == "stage"]
+        assert document_stages
+        assert all(span.attributes["pipeline.stage.name"] == "document_processing" for span in document_stages)
+        if force_retry:
+            proof_attempts = sorted(
+                span.attributes["pipeline.stage.attempt"] for span in document_stages
+                if span.attributes["pipeline.stage.item_role"] == "proof"
+            )
+            assert proof_attempts == [1, 2]
+            assert body["status"] == "REVIEW_REQUIRED"
+            assert any(
+                event.attributes.get("pipeline.check.id") == "ocr.retry_exhausted"
+                for span in spans for event in span.events
+            )
+        elif block_policy:
+            run_span = next(span for span in spans if span.attributes.get("pipeline.span.role") == "execution")
+            assert body["status"] == "BLOCKED"
+            assert any(item.endswith(":proof") for item in run_span.attributes["pipeline.run.items"])
+            assert [span.attributes["pipeline.stage.item_role"] for span in document_stages] == ["policy"]
+        else:
+            assert body["status"] == "COMPLETED", body
+            assert body["decision"]["decision"] == expected_decision
+            service_rule = next(row for row in body["decision"]["rules"] if row["rule_id"] == "rule.service_in_coverage")
+            assert service_rule["result"] == expected_rule
+        pii_values = ("Asha Rao", "POL-101", "100.00", "150.00")
+        exported_values = []
+        for span in spans:
+            exported_values.extend(repr(value) for value in span.attributes.values())
+            exported_values.extend(
+                repr(value)
+                for event in span.events
+                for value in event.attributes.values()
+            )
+        for pii in pii_values:
+            assert all(pii not in value for value in exported_values)
     finally:
         app.dependency_overrides.clear()
         engine.dispose()

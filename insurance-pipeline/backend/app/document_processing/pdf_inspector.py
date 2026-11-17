@@ -1,26 +1,8 @@
-import uuid
 from pathlib import Path
 from typing import List, Union, Optional
 from pydantic import BaseModel, Field
 import pymupdf as fitz
-from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
-
-from app.telemetry.attributes import (
-    DEFAULT_PIPELINE_NAME,
-    DEFAULT_PIPELINE_VERSION,
-    PIPELINE_NAME,
-    PIPELINE_VERSION,
-    EXECUTION_ID,
-    EXECUTION_ENTITY_ID,
-    STAGE_NAME,
-    STAGE_VERSION,
-    STAGE_STATUS,
-    INPUT_ARTIFACT_IDS,
-    OUTPUT_ARTIFACT_IDS,
-    ERROR_TYPE,
-    ERROR_MESSAGE,
-)
+import autopsy_sdk as autopsy
 from app.document_processing.exceptions import (
     DocumentProcessingError,
     UnsupportedDocumentTypeError,
@@ -30,9 +12,6 @@ from app.document_processing.document_loader import (
     ValidatedDocument,
     load_and_validate_document,
 )
-
-tracer = trace.get_tracer("insurance-pipeline")
-
 
 def is_meaningful_text(text: str) -> bool:
     """Checks if extracted text string contains meaningful non-whitespace characters."""
@@ -111,33 +90,7 @@ class PDFInspector:
             UnsupportedDocumentTypeError: If the document is not a .pdf file.
             DocumentProcessingError: If the PDF is corrupt, empty (0 pages), or unreadable.
         """
-        with tracer.start_as_current_span("pdf_verification") as span:
-            curr_claim_id = claim_id
-            curr_exec_id = execution_id
-            if not curr_claim_id or not curr_exec_id:
-                curr_span = trace.get_current_span()
-                if curr_span and hasattr(curr_span, "attributes") and curr_span.attributes:
-                    curr_claim_id = curr_claim_id or curr_span.attributes.get("claim_id") or curr_span.attributes.get("execution.entity_id")
-                    curr_exec_id = curr_exec_id or curr_span.attributes.get("execution.id")
-
-            curr_claim_id = curr_claim_id or (document_id or 1)
-            curr_exec_id = curr_exec_id or f"EXEC-{uuid.uuid4().hex[:12].upper()}"
-
-            doc_ref = str(document_id) if document_id is not None else "unknown"
-            input_artifacts = [f"doc_{doc_ref}"]
-            output_artifacts = [f"art_verification_{doc_ref}"]
-
-            span.set_attribute("claim_id", curr_claim_id)
-            span.set_attribute(EXECUTION_ID, curr_exec_id)
-            span.set_attribute(EXECUTION_ENTITY_ID, str(curr_claim_id))
-            span.set_attribute(PIPELINE_NAME, DEFAULT_PIPELINE_NAME)
-            span.set_attribute(PIPELINE_VERSION, DEFAULT_PIPELINE_VERSION)
-            span.set_attribute(STAGE_NAME, "pdf_verification")
-            span.set_attribute(STAGE_VERSION, "1.0.0")
-            span.set_attribute(STAGE_STATUS, "running")
-            span.set_attribute(INPUT_ARTIFACT_IDS, input_artifacts)
-            span.set_attribute(OUTPUT_ARTIFACT_IDS, output_artifacts)
-
+        with autopsy.operation("pdf_verification"):
             try:
                 if isinstance(document, (str, Path)):
                     validated_doc = load_and_validate_document(document)
@@ -148,12 +101,6 @@ class PDFInspector:
                         f"Invalid document input type: {type(document).__name__}. "
                         f"Expected ValidatedDocument, str, or Path."
                     )
-
-                doc_ref = str(document_id) if document_id is not None else "unknown"
-                input_artifacts = [f"doc_{doc_ref}"]
-                output_artifacts = [f"art_verification_{doc_ref}"]
-                span.set_attribute(INPUT_ARTIFACT_IDS, input_artifacts)
-                span.set_attribute(OUTPUT_ARTIFACT_IDS, output_artifacts)
 
                 if validated_doc.extension.lower() != ".pdf":
                     raise UnsupportedDocumentTypeError(
@@ -221,13 +168,6 @@ class PDFInspector:
                     processing_path = "text_extraction" if has_embedded_text else "ocr"
                     ocr_required = ocr_required_pages_count > 0
 
-                    span.set_attribute("pdf.type", "text-based" if has_embedded_text else "scanned")
-                    span.set_attribute("pdf.is_text_based", bool(has_embedded_text))
-                    span.set_attribute("pdf.is_scanned", bool(is_scanned))
-                    span.set_attribute("pdf.verification_method", "pymupdf_text_inspection")
-                    span.set_attribute(STAGE_STATUS, "success")
-                    span.set_status(Status(StatusCode.OK))
-
                     return PDFInspectionResult(
                         file_name=validated_doc.file_name,
                         total_pages=total_pages,
@@ -256,21 +196,7 @@ class PDFInspector:
                             doc.close()
                         except Exception:
                             pass
-            except Exception as e:
-                span.set_attribute(STAGE_STATUS, "failed")
-                span.set_attribute(ERROR_TYPE, type(e).__name__)
-                safe_message = "PDF verification failed."
-                span.set_attribute(ERROR_MESSAGE, safe_message)
-                span.set_attribute(OUTPUT_ARTIFACT_IDS, [])
-                span.set_status(Status(StatusCode.ERROR, safe_message))
-                span.add_event(
-                    "exception",
-                    {
-                        "exception.type": type(e).__name__,
-                        "exception.message": safe_message,
-                        "exception.escaped": True,
-                    },
-                )
+            except Exception:
                 raise
 
 

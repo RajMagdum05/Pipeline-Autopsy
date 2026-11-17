@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from autopsy.core.contract import artifact_id
 from autopsy.db.database import SessionLocal
 from autopsy.db.models import (
-    ArtifactRecord, DiagnosisJobRecord, ExecutionRecord, FindingRecord,
+    ArtifactRecord, DiagnosisJobRecord, ExecutionRecord, ExplanationRecord, FindingRecord,
     ObservationRecord, PipelineRecord, SpanRecord,
 )
 from autopsy.main import app
@@ -195,6 +195,13 @@ def test_worker_persists_healthy_verdict(client):
         assert execution.trace_grade == "A"
         assert execution.diagnosed_at is not None
         assert job.status == "done"
+        explanation = db.get(ExplanationRecord, execution_id)
+        assert explanation is not None
+        assert explanation.source == "template"
+        assert "No pipeline fault" in explanation.summary
+    response = client.get(f"/v1/executions/{execution_id}/diagnosis")
+    assert response.status_code == 200
+    assert response.json()["explanation"]["source"] == "template"
 
 
 def test_ingest_schedule_uses_run_settle_and_incomplete_timeout(client, monkeypatch):

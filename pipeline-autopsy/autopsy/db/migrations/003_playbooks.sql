@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS playbooks (
+    id VARCHAR(128) PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    match JSON_TYPE NOT NULL DEFAULT '{}',
+    body TEXT NOT NULL,
+    pack VARCHAR(128) NOT NULL DEFAULT 'generic'
+);
