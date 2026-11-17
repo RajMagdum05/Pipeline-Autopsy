@@ -1,0 +1,12 @@
+{
+  "name": "pipeline-autopsy-website",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static marketing landing page and technical documentation site for Pipeline Autopsy",
+  "scripts": {
+    "start": "npx -y serve . -l 3000",
+    "dev": "npx -y serve . -l 3000",
+    "build": "node -e \"console.log('Website is static HTML and ready for deployment.')\"",
+    "built": "npm run build"
+  }
+}

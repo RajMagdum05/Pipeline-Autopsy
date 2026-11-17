@@ -1,0 +1,11 @@
+.env
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+storage/
+database/postgres/*
+!database/postgres/.gitkeep
+database/local_doc_storage/claims/*
+!database/local_doc_storage/claims/.gitkeep

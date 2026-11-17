@@ -1,0 +1,1 @@
+DOCUMENT TYPE: medical report. Extract medical subtype, patient/facility/clinician/laboratory, stated dates, documented history, explicit diagnoses and printed codes, tests, results, units, reference ranges, flags/findings, and stated medicines/recommendations. Do not invent diagnoses/codes or interpret findings; preserve units and attribution.

@@ -1,0 +1,1 @@
+DOCUMENT TYPE: FIR or accident report. Identify the actual report subtype, authority/station, report number/date, incident date/time/location, people and roles, incident and injury descriptions, identifiers and legal sections. Attribute allegations and reported statements to the source/person; do not present them as verified facts or conclusions.

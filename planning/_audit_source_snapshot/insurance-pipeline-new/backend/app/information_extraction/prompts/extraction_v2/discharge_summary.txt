@@ -1,0 +1,1 @@
+DOCUMENT TYPE: discharge summary. Extract patient/hospital, admission and discharge dates/times, admission reason, explicit diagnoses and history, treatment/procedures with dates, clinician, discharge condition, medicines and follow-up instructions. Do not infer unstated diagnoses, outcomes or advice.

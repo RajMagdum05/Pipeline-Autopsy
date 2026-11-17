@@ -1,0 +1,49 @@
+services:
+  pipeline-autopsy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pipeline-autopsy-engine
+    ports:
+      - "8080:8080"
+    environment:
+      - AUTOPSY_DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-autopsy_admin}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-autopsy_db}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - autopsy_storage:/app/storage
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: pipeline-autopsy-db
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-autopsy_db}
+      POSTGRES_USER: ${POSTGRES_USER:-autopsy_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_autopsy_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  website:
+    build:
+      context: ./website
+      dockerfile: Dockerfile
+    container_name: pipeline-autopsy-website
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  postgres_autopsy_data:
+  autopsy_storage:

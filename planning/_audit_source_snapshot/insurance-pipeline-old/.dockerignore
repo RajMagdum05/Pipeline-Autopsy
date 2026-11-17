@@ -1,0 +1,13 @@
+.venv/
+frontend/
+tests/
+storage/
+database/postgres/
+database/local_doc_storage/
+.git/
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.db
+.env

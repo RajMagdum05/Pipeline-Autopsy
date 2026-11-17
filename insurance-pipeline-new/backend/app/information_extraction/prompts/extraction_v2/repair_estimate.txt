@@ -1,0 +1,1 @@
+DOCUMENT TYPE: repair estimate. Extract vendor, estimate number/date, customer/asset identifiers, reported damage, parts/labor, quantities, rates, taxes, discounts, estimated total/currency, validity and terms. Keep costs identified as estimates; do not label them invoices or payments and do not infer health-policy relevance.
