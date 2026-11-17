@@ -1,4 +1,12 @@
-FROM python:3.11-slim
+FROM node:20-alpine AS ui-build
+
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci
+COPY ui/ ./
+RUN npm run build
+
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -10,10 +18,9 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
+COPY --from=ui-build /ui/dist /app/ui/dist
 
 ENV PYTHONPATH=/app:/app/autopsy
-ENV AUTOPSY_DATABASE_URL=sqlite:////app/storage/autopsy.db
-
 EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \

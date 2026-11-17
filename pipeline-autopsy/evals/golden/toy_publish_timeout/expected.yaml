@@ -1,0 +1,11 @@
+# Draft expectations for the A2.7 review before commit.
+verdict: ROOT_CAUSE_IDENTIFIED
+trace_grade: A
+origins: [publish]
+findings:
+  publish:
+    role: origin
+    classification: SERVICE_EXECUTION_FAILURE
+    confidence: supported
+must_not_blame: [fetch, summarize]
+required_evidence_codes: [stage_failed]

@@ -1,6 +1,6 @@
 # ⚙️ Pipeline Autopsy Backend Service
 
-Core observability, telemetry normalization, DAG reconstruction, failure detection, and autonomous investigation service.
+Pipeline telemetry ingestion, evidence handling, deterministic diagnosis, and read APIs.
 
 For complete documentation, system architecture, and full-stack setup, please refer to the [Root README](../README.md).
 
@@ -8,23 +8,14 @@ For complete documentation, system architecture, and full-stack setup, please re
 
 ## 📦 Directory Overview
 
-- **`api/`**: FastAPI routing layer (`routes.py`), request/response Pydantic schemas (`schemas.py`), and API key authentication (`auth.py`).
+- **`api/`**: FastAPI ingestion, manifest, artifact, and schema-v2 read routes, plus API key authentication.
 - **`db/`**: SQLAlchemy models (`models.py`), database session manager (`database.py`), and automated table bootstrap (`init_db.py`).
-- **`detectors/`**: Modular failure detection heuristics:
-  - `ErrorStatusDetector`
-  - `ExceptionDetector`
-  - `TimeoutDetector`
-  - `DependencyFailureDetector`
-  - `StructuralTelemetryDetector`
-  - `ExplicitValidationDetector`
-- **`domain/`**: Pure domain data models, taxonomies, and enums (`enums.py`, `execution.py`, `failure.py`, `evidence.py`).
+- **`core/`**: Deterministic graph reconstruction, contract checks, and diagnosis.
+- **`explain/`**: Deterministic explanation template retained for the explanation bundle.
+- **`artifacts/`** and **`manifests/`**: Evidence storage and pipeline manifest registration/validation.
+- **`worker/`**: Background diagnosis scheduling and persistence.
 - **`services/`**: Core engines:
-  - `ingestion_service.py`: Standard OpenTelemetry (OTLP/HTTP & Protobuf) normalization and persistence.
-  - `reconstruction_service.py`: Deterministic DAG graph builder (`ExecutionGraph`, `ExecutionNode`).
-  - `failure_detection_service.py`: Heuristic detector runner and finding aggregator.
-  - `root_cause_service.py`: Upstream causal attribution engine and impact graph generator.
-  - `diagnosis_service.py`: Deterministic diagnosis builder and Gemini LLM reasoning service.
-  - `agent_service.py`: Autonomous ReAct forensic investigation agent and controlled tools.
+  - `ingestion_service.py`: OTLP normalization, persistence, and diagnosis scheduling.
   - `credential_service.py`: Tenant project onboarding and SHA-256 API key management.
 
 ---

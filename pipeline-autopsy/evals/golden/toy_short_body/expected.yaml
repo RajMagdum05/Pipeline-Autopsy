@@ -1,0 +1,11 @@
+# Draft expectations for the A2.7 review before commit.
+verdict: ROOT_CAUSE_IDENTIFIED
+trace_grade: A
+origins: [fetch]
+findings:
+  fetch:
+    role: origin
+    classification: OUTPUT_CONTRACT_VIOLATION
+    confidence: supported
+must_not_blame: [summarize, publish]
+required_evidence_codes: [schema.minLength]

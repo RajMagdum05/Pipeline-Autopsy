@@ -1,0 +1,14 @@
+opentelemetry-api>=1.25
+
+[configure]
+opentelemetry-sdk>=1.25
+opentelemetry-exporter-otlp-proto-http>=1.25
+
+[dev]
+pytest>=8
+opentelemetry-sdk>=1.25
+opentelemetry-exporter-otlp-proto-http>=1.25
+httpx>=0.27
+
+[upload]
+httpx>=0.27

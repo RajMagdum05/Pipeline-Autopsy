@@ -1,98 +1,160 @@
-# 📋 Pipeline Autopsy — OpenTelemetry Trace Contract
+# 31: Trace contract v3 (`pipeline-trace/3`)
 
-This document defines the strict telemetry contract that any AI pipeline must follow to be observable, reconstructible, and diagnosable by **Pipeline Autopsy**.
+This file is the source for `shared-docs/TRACE_CONTRACT.md` (task C1.1).
 
-> **Single Source of Truth**: The communication between any pipeline (such as `insurance-pipeline`) and `pipeline-autopsy` occurs exclusively via OpenTelemetry traces exported over OTLP following this specification. No shared code or databases exist.
+- **Standards first.** Where an OpenTelemetry semantic convention fits, we use it.
+- **Custom attributes are namespaced** under `pipeline.*`. They are needed because OTel defines no pipeline-stage, artifact-lineage or check semantics.
+- **`autopsy.*`** is reserved for SDK internals.
 
----
-
-## 1. Trace Hierarchy & Execution Model
-
-Every AI pipeline execution must adhere to the following 1-to-1-to-Many hierarchy:
+## 1. Shape of one run
 
 ```
-Business Entity (e.g., Claim, Order, Transaction)
-  └── Execution Attempt (unique per run attempt)
-        └── Root Trace (1 root trace per execution attempt)
-              ├── Child Span: Stage 1
-              ├── Child Span: Stage 2
-              │     └── Sub-operation Span (optional)
-              └── Child Span: Stage N
+run span            pipeline.span.role=execution   (one per run; root of the trace)
+ ├─ stage span      pipeline.span.role=stage       (one per stage attempt; per item if item-scoped)
+ │   ├─ operation   pipeline.span.role=operation   (LLM call, OCR page, DB write, HTTP …; any depth)
+ │   └─ events      pipeline.check                 (zero or more, on stage or operation spans)
+ └─ stage span …
 ```
 
-1. **One Root Trace per Execution**: Exactly one root span must be created for a single pipeline run attempt (e.g. `insurance_claim_execution`).
-2. **Stable Entity ID**: Use a stable business identifier across repeated attempts:
-   - Insurance: `claim_id`
-   - Finance: `transaction_id`
-   - Healthcare: `patient_case_id`
-3. **Unique Execution ID**: Every single run attempt must generate a unique `execution_id` (e.g. UUID or monotonic run ID `EXEC-001`, `EXEC-002`).
-4. **One Span per Stage**: Every major functional stage must execute inside its own child span.
-5. **Parent-Child Hierarchy**: All stage spans must be direct or indirect children of the root execution span.
+## 2. Field table
 
----
+**Location key:** R = resource · S = span attribute · E = span event · L = span link · St = span status · A = artifact store · DB = producer business DB
 
-## 2. Required Span Attributes
+### Identity and grouping
 
-Every span produced by any stage of the pipeline **MUST** contain these 8 required attributes:
+| Field | Loc | Type | Req | Producer | Why Autopsy needs it | Sensitive? | Limits |
+|---|---|---|---|---|---|---|---|
+| `service.name` [semconv] | R | string | **req** | app | Which deployable emitted the span | no | low cardinality |
+| `service.version` [semconv] | R | string | rec | app | Correlate regressions with builds | no | |
+| `deployment.environment.name` [semconv] | R | string | rec | app | Separate dev, staging and prod baselines | no | `development`/`staging`/`production`/`test` |
+| `pipeline.name` | S (all) | string | **req** | SDK | Selects the manifest | no | `[a-z0-9-]+`, ≤ 64 |
+| `pipeline.version` | S (all) | string | **req** | SDK | Selects the manifest version | no | semver |
+| `pipeline.run.id` | S (all) | string | **req** | SDK | Groups spans into one run, even across traces | no | UUID/ULID; new per run |
+| `pipeline.entity.id` | S (all) | string | opt | app | Groups runs of one business object | **must be opaque** (UUID, not a policy number or name) | ≤ 64 |
+| `pipeline.span.role` | S (all) | enum | **req** | SDK | Separates run / stage / operation | no | `execution`, `stage`, `operation` |
+| trace_id / span_id / parent_span_id | OTLP | hex | **req** | OTel | Containment, roll-up | no | 32/16 hex |
 
-| Attribute Key | Type | Description | Example |
-|:---|:---|:---|:---|
-| `pipeline.name` | `string` | Canonical name of the pipeline | `"insurance-pipeline"` |
-| `pipeline.version` | `string` | Version of the executing pipeline | `"1.0.0"` |
-| `execution.id` | `string` | Unique identifier for this execution attempt | `"exec_9872_attempt_1"` |
-| `execution.entity_id` | `string` | Business entity identifier | `"CLM-2026-0042"` |
-| `stage.name` | `string` | Canonical name of the stage | `"document_processing"` |
-| `stage.status` | `string` | Execution outcome of the stage (`"success"`, `"failed"`, `"partial"`) | `"success"` |
-| `input.artifact_ids` | `string[]` or `string` | List of artifact IDs consumed as input | `["art_raw_invoice_pdf"]` |
-| `output.artifact_ids` | `string[]` or `string` | List of artifact IDs generated as output | `["art_ocr_text_json", "art_page_1_png"]` |
+### Run span only
 
----
+| Field | Loc | Type | Req | Why | Values |
+|---|---|---|---|---|---|
+| `pipeline.run.items` | S | string[] | req if any item-scoped stage | Knows documents that never started (blocked) | `"<item_id>:<role>"` |
+| `pipeline.run.trigger` | S | enum | opt | Explains cached replays and re-runs | `api`, `rerun`, `cache_hit`, `test` |
+| `pipeline.run.outcome` | S | enum | **req** at end | Tail-sampling key; run summary | `success`, `failed`, `partial`, `blocked` |
+| `pipeline.run.previous_id` | S + L | string + link | opt | Links a re-run to its predecessor | |
 
-## 3. Recommended & Contextual Attributes
+### Stage span
 
-Where applicable, stages should record semantic attributes:
+| Field | Loc | Type | Req | Why Autopsy needs it | Values / limits |
+|---|---|---|---|---|---|
+| `pipeline.stage.name` | S | string | **req** | Must exist in the manifest | snake_case |
+| `pipeline.stage.status` | S | enum | **req**, set once on exit | The outcome even when OTel status is OK (silent failures) | `success`, `failed`, `partial`, `skipped` |
+| `pipeline.stage.attempt` | S | int | **req** | Final attempt decides; earlier ones = `retried` | ≥ 1 |
+| `pipeline.stage.item_id` | S | string | req if scope=item | Per-document diagnosis | opaque ID |
+| `pipeline.stage.item_role` | S | string | rec | Control edges (policy gate) | e.g. `policy`, `proof` |
+| `pipeline.stage.version` | S | string | opt | E.g. validator, prompt bundle or rules version | |
+| `pipeline.artifact.input_ids` | S | string[] | **req** (may be empty) | **Lineage: what this stage read** | ≤ 64 ids |
+| `pipeline.artifact.output_ids` | S | string[] | **req** (may be empty) | **Lineage: what this stage wrote** | ≤ 64 ids |
+| span status | St | Error/Ok | req when failed | Standard failure flag | description = sanitized message ≤ 500 chars |
+| `error.type` [semconv] | S | string | req when failed | Low-cardinality failure kind | exception class or stable code |
+| `pipeline.error.class` | S | enum | req when failed | Separates independent infra faults from data-caused failures (RCA R1 vs R3/R8) | `infra`, `data`, `unknown` |
 
-| Attribute Key | Type | Stage Applicable | Example |
-|:---|:---|:---|:---|
-| `stage.version` | `string` | All stages | `"1.2.0"` |
-| `model.name` | `string` | LLM / Extraction stages | `"gemini-1.5-pro"`, `"gpt-4o"` |
-| `model.version` | `string` | LLM / Extraction stages | `"002"` |
-| `prompt.version` | `string` | LLM / Extraction stages | `"v2.4-medical-billing"` |
-| `retrieval.query` | `string` | RAG / Policy retrieval stages | `"pre-existing condition waiting period cardiac"` |
-| `retrieval.chunk_ids` | `string[]` | RAG / Policy retrieval stages | `["chunk_pol_441", "chunk_pol_442"]` |
-| `error.type` | `string` | Failed stages | `"TimeoutError"`, `"SchemaValidationError"` |
-| `error.message` | `string` | Failed stages | `"PyMuPDF failed to extract text from corrupted page 3"` |
-| `validation.rule_id` | `string` | Validation / Rule stages | `"RULE_ROOM_RENT_LIMIT"` |
-| `validation.result` | `string` | Validation / Rule stages | `"PASS"`, `"FAIL"`, `"MISSING_DATA"` |
+### Operation spans (examples)
 
----
+| Field | Loc | Req | Why | Notes |
+|---|---|---|---|---|
+| `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.output.type` [semconv, Development] | S | rec for LLM calls | Model identity, truncation (`max_tokens`), cost | `gcp.gemini`, `generate_content`, `json` |
+| `pipeline.prompt.id`, `pipeline.prompt.version` | S | rec for LLM calls | Which prompt template version | e.g. `classification_v1`, `document-extraction-v2` |
+| `pipeline.schema.id`, `pipeline.schema.version` | S | rec | Which output schema | e.g. `document-facts-v1` |
+| `pipeline.item.index`, `pipeline.item.count` | S | opt | Page fan-out inside a stage | |
+| `http.*`, `db.*` [semconv] | S | auto | Infra evidence | from auto-instrumentation |
 
-## 4. Artifact Reference Rule (No Bloat in Traces)
+### Checks (event `pipeline.check`)
 
-Spans must remain lightweight and free of PII or large binary payloads.
+| Field | Type | Req | Why | Limits |
+|---|---|---|---|---|
+| `pipeline.check.id` | string | **req** | Stable identity; playbook key | e.g. `ocr.quality`, `classification.matches_declared`, `extraction.quote_support`, `rule.coverage_period` |
+| `pipeline.check.kind` | enum | **req** | Type of evidence. **`decision_rule` = business outcome (e.g. not covered): context only, never treated as a fault** | `schema`, `threshold`, `rule`, `grounding`, `classification`, `safety`, `decision_rule` |
+| `pipeline.check.result` | enum | **req** | | `pass`, `warn`, `fail`, `skip` |
+| `pipeline.check.action` | enum | **req** | Did the gate stop the flow? | `blocked`, `continued`, `review` |
+| `pipeline.check.target_artifact_id` | string | rec | **Which artifact is bad.** It may be an *input*; the producer of that input is then implicated | |
+| `pipeline.check.field` | string | opt | Field-level trace-back | **path only**, e.g. `facts.admission_date` |
+| `pipeline.check.observed` | string | opt | Short evidence | ≤ 64 chars, **numbers, enums or codes only, never document text** |
+| `pipeline.check.expected` | string | opt | | ≤ 64 chars |
+| `pipeline.check.rule_version` | string | opt | | |
 
-### 🚫 Strictly Forbidden in Span Attributes:
-- Full insurance documents or policy texts
-- Full PDFs or image binary blobs
-- Base64-encoded files
-- Unredacted customer Personally Identifiable Information (PII)
-- Massive LLM response payloads exceeding 4 KB
+Only `warn` and `fail` checks are needed for diagnosis. `pass` checks are optional, but they help: they show coverage, and the core uses passes for trace-back.
 
-### ✅ Required Pattern:
-Store large payloads in an external artifact store (filesystem, S3, MinIO) and record only the artifact pointer IDs inside the span:
+### Artifacts (never in spans except as IDs)
 
-```python
-span.set_attribute("input.artifact_ids", ["ART-DOC-001"])
-span.set_attribute("output.artifact_ids", ["ART-EXTRACTION-001", "ART-RENDERED-PG1"])
+| Field | Where | Notes |
+|---|---|---|
+| `artifact_id` | spans (lists), checks | `"art_" + sha256(run_id ‖ 0x00 ‖ kind ‖ 0x00 ‖ item_id ‖ 0x00 ‖ canonical_bytes)[:16]` (hex) |
+| canonical bytes | — | dict/list → `json.dumps(sort_keys=True, ensure_ascii=False, separators=(",",":")).encode()`; str → UTF-8; bytes as is |
+| `kind`, `content_type`, `size_bytes`, `sha256` (full content hash), `stage`, `item_id`, `schema` | A | Uploaded only at evidence level E2 |
+
+**Why `run_id` + `kind` + `item_id` are in the hash:** the earlier pretest found that identical payloads (`{"decision":"approved"}`) from two stages collided and broke lineage. Including the item also prevents two identical blank pages in different documents from colliding.
+
+## 3. Naming, cardinality and versioning rules
+
+1. Keys are lowercase dot-separated; enum values are lowercase snake_case.
+2. **No high-cardinality free text in attribute values used for grouping** (`check.id`, `error.type`, `stage.name`). IDs (run, entity, item, artifact) are high-cardinality by design. They are fine as attributes, but must not be metric labels.
+3. The contract version is announced by the SDK as `autopsy.schema.version = "pipeline-trace/3"` on the run span.
+4. **Compatibility:**
+   - Adding an optional field is a minor change.
+   - Renaming or removing a field, or changing an enum, is a major change.
+   - Autopsy accepts the current major version plus a v1 alias map.
+5. **v1 → v3 aliases accepted by Autopsy ingestion** (C1.2):
+
+| v1 | v3 |
+|---|---|
+| `execution.id` | `pipeline.run.id` |
+| `execution.entity_id` | `pipeline.entity.id` |
+| `stage.name` | `pipeline.stage.name` |
+| `stage.status` | `pipeline.stage.status` |
+| `input.artifact_ids` | `pipeline.artifact.input_ids` |
+| `output.artifact_ids` | `pipeline.artifact.output_ids` |
+| `autopsy.role` | `pipeline.span.role` |
+| `stage.attempt` | `pipeline.stage.attempt` |
+| `error.class` | `pipeline.error.class` |
+| event `autopsy.check` (with `check.*`) | event `pipeline.check` (with `pipeline.check.*`) |
+
+## 4. Validation behaviour (what Autopsy does with violations)
+
+| Violation | Effect |
+|---|---|
+| No run span, more than one run span, a cycle, or a stage span without name/status | Grade **C**, verdict `INSUFFICIENT_EVIDENCE`, structural observations listed |
+| Orphan span, missing attempt or ID lists, invalid status value, unknown stage, referenced artifact missing (E2), lineage gap, span ERROR but stage success, expected stage missing with no explanation | Grade **B**, confidence capped at `possible` |
+| Attribute truncated (dropped counts > 0) | Structural `warn` |
+| PII pattern in an attribute value | Value masked before storage, structural `warn pii_in_span` |
+| Unknown `pipeline.name` (no manifest registered) | Stored, execution `unregistered`, no diagnosis |
+
+## 5. Example (one stage span, as OTLP/JSON)
+
+```json
+{"traceId":"4bf92f3577b34da6a3ce929d0e0e4736","spanId":"00f067aa0ba902b7","parentSpanId":"a2fb4a1d1a96d312",
+ "name":"information_extraction","kind":1,"startTimeUnixNano":"1794700000000000000","endTimeUnixNano":"1794700004200000000",
+ "status":{"code":2,"message":"Extraction validation failed"},
+ "attributes":[
+  {"key":"pipeline.name","value":{"stringValue":"insurance-claims"}},
+  {"key":"pipeline.version","value":{"stringValue":"2.0.0"}},
+  {"key":"pipeline.run.id","value":{"stringValue":"0193f1c2-…"}},
+  {"key":"pipeline.entity.id","value":{"stringValue":"6f0e…"}},
+  {"key":"pipeline.span.role","value":{"stringValue":"stage"}},
+  {"key":"pipeline.stage.name","value":{"stringValue":"information_extraction"}},
+  {"key":"pipeline.stage.status","value":{"stringValue":"failed"}},
+  {"key":"pipeline.stage.attempt","value":{"intValue":"1"}},
+  {"key":"pipeline.stage.item_id","value":{"stringValue":"bill-7c1e…"}},
+  {"key":"pipeline.stage.item_role","value":{"stringValue":"proof"}},
+  {"key":"pipeline.artifact.input_ids","value":{"arrayValue":{"values":[{"stringValue":"art_1a2b3c4d5e6f7a8b"},{"stringValue":"art_9c8d7e6f5a4b3c2d"}]}}},
+  {"key":"pipeline.artifact.output_ids","value":{"arrayValue":{"values":[{"stringValue":"art_0f1e2d3c4b5a6978"}]}}},
+  {"key":"error.type","value":{"stringValue":"ExtractionValidationFailed"}},
+  {"key":"pipeline.error.class","value":{"stringValue":"data"}}],
+ "events":[{"name":"pipeline.check","timeUnixNano":"1794700004100000000","attributes":[
+  {"key":"pipeline.check.id","value":{"stringValue":"extraction.quote_support"}},
+  {"key":"pipeline.check.kind","value":{"stringValue":"grounding"}},
+  {"key":"pipeline.check.result","value":{"stringValue":"fail"}},
+  {"key":"pipeline.check.action","value":{"stringValue":"review"}},
+  {"key":"pipeline.check.target_artifact_id","value":{"stringValue":"art_0f1e2d3c4b5a6978"}},
+  {"key":"pipeline.check.field","value":{"stringValue":"facts.total"}}]}]}
 ```
-
----
-
-## 5. Telemetry Transport
-
-1. **OTLP Standard**: All spans must be exported using the OpenTelemetry Protocol (`OTLP/HTTP` or `OTLP/gRPC`).
-2. **Standard Payload**: Protobuf or JSON according to OpenTelemetry trace specification v1.
-3. **Target Endpoints**:
-   - Trace Collector / Storage: `http://localhost:4318/v1/traces` (HTTP) or `http://localhost:4317` (gRPC)
-   - Arize Phoenix: `http://localhost:6006`
-   - Pipeline Autopsy Ingestion: `http://localhost:8080/v1/traces`

@@ -1,0 +1,1 @@
+"""OTLP wire-format ingestion."""

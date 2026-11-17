@@ -1,0 +1,50 @@
+manifest: pipeline-manifest/1
+pipeline: insurance-claims
+version: 2.0.0
+pack: insurance                       # optional: loads pipeline-autopsy/packs/insurance (extra validators, playbooks)
+evidence:
+  level: E2                           # E0 spans only | E1 + checks | E2 + allow-listed artifact content
+  kinds_allowed: [page_text, document_facts, decision]   # only these may be uploaded (page_text as a redacted excerpt, see 33)
+  retention_days: 14
+external_inputs: [source_document, claim_form]   # kinds no stage produces
+items:
+  roles: [policy, proof]
+stages:                               # list in dependency order
+  - name: document_processing
+    scope: item
+    requires: [{stage: extraction_validation, item_role: policy}]   # proofs wait for the policy (control edge)
+    consumes: [source_document]
+    produces: [page_text]
+  - name: content_classification
+    scope: item
+    consumes: [page_text]
+    produces: [classification]
+  - name: information_extraction
+    scope: item
+    consumes: [page_text, classification]
+    produces: [document_facts]
+  - name: extraction_validation
+    scope: item
+    consumes: [document_facts, page_text]
+    produces: [validated_facts]
+  - name: adjudication
+    scope: run
+    consumes: [validated_facts, claim_form]
+    produces: [decision]
+  - name: final_result
+    scope: run
+    consumes: [decision]
+    produces: [claim_result]
+artifacts:
+  document_facts:
+    consistency:
+      - id: extraction.grounded_in_page_text
+        validator: grounded_fields
+        source: page_text
+        fields: [policy_number, coverage_start, coverage_end, sum_insured, admission_date, invoice_date, total]
+  claim_result:
+    consistency:
+      - id: final.matches_decision
+        validator: equals_upstream
+        source: decision
+        fields: [decision]
