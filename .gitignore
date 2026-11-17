@@ -1,2 +1,35 @@
+# Local credentials and environment files. Keep committed templates visible.
 .env
+.env.*
+!.env.example
+!.env.*.example
 .firebase/
+
+# Downloaded dependencies and generated build output.
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Python environments, bytecode, and test caches.
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest-tmp*/
+**/pytest-tmp*/
+
+# Local databases and runtime storage.
+*.db
+*.sqlite
+*.sqlite3
+storage/*
+!storage/.gitkeep
+
+# Local helper tools and generated audit bundles.
+**/backend/.local-tools/
+*.tgz
+
+# Generated SDK download; source remains in packages/autopsy-sdk.
+/pipeline-autopsy/website/downloads/*.zip

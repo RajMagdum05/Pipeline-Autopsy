@@ -1,5 +1,12 @@
 # 🔬 Pipeline Autopsy Workspace
 
+## Current layout
+
+- `insurance-pipeline/` is the active producer application (intake and document processing).
+- `pipeline-autopsy/` is the separate trace ingestion and diagnosis service plus SDK.
+- `shared-docs/` contains the current shared telemetry and architecture references.
+- `planning/` contains the roadmap; old audit notes are historical and may contain stale paths.
+
 This repository contains two completely independent, decoupled projects connected only through OpenTelemetry traces and a documented trace contract:
 
 ```
