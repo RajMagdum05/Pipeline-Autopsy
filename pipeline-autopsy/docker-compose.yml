@@ -10,6 +10,7 @@ services:
       - AUTOPSY_DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-autopsy_admin}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-autopsy_db}
       - AUTOPSY_BLOB_DIR=/app/storage/artifacts
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - AUTOPSY_LLM_MODEL=${AUTOPSY_LLM_MODEL:-}
     depends_on:
       postgres:
         condition: service_healthy

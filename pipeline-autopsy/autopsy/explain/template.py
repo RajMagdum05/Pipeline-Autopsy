@@ -45,7 +45,8 @@ def build_template(bundle):
         if selected:
             line += ". Evidence excerpt: " + " | ".join(selected[:2])
         narrative.append(line[:600])
-    if "remediation" not in bundle:
+    if "remediation" not in bundle or not findings:
+        # Healthy runs have nothing to remediate; never show a "no playbook" card.
         remediation = []
     else:
         remediation = bundle["remediation"] or [{

@@ -60,7 +60,8 @@ uvicorn autopsy.main:app --host 127.0.0.1 --port 8080 --reload
 | Variable | Description | Default |
 |:---|:---|:---|
 | `AUTOPSY_DATABASE_URL` | PostgreSQL connection string or SQLite fallback | `postgresql+psycopg://autopsy_admin:changeme@localhost:5433/autopsy_db` |
-| `GEMINI_API_KEY` | Google Gemini API key for forensic investigation reasoning | Required for LLM forensic agent |
+| `GEMINI_API_KEY` | Google Gemini API key (or `GOOGLE_API_KEY`) used only to draft explanation prose | Optional |
+| `AUTOPSY_LLM_MODEL` | Gemini model for guarded explanation drafts (temperature 0, JSON schema, 20 s timeout, at most 2 attempts). Drafts must pass guardrails G1–G9 or the deterministic template is published. If this or the key is unset, the template is always used. The LLM never changes origin, roles, classification, confidence or verdict. | Unset (template only) |
 
 ---
 
@@ -71,3 +72,24 @@ Run all unit and integration tests:
 ```bash
 pytest tests/
 ```
+
+### Explanation quality evaluation (L2)
+
+Run the deterministic evaluator without making model calls:
+
+```bash
+python evals/run_l2.py
+```
+
+The evaluator includes only recorded cases whose `expected.yaml` sets
+`l2_approved: true`, includes expected findings and evidence codes, and still
+matches the diagnosed verdict, trace grade, origins, findings, and required
+evidence. The current toy expectations remain drafts pending A2.7 review, so
+the latest offline run had **0 eligible cases** and excluded all three toy
+cases. First-pass, fallback, token, latency, and faithfulness metrics are
+therefore unavailable; no model call or faithfulness judge was run. L1 remains
+the separate diagnosis evaluation (`python evals/run_l1.py`).
+
+Live Gemini evaluation requires explicit `--live`, `AUTOPSY_LLM_MODEL`, and
+`GEMINI_API_KEY` (or `GOOGLE_API_KEY`). It should be run only against approved
+recorded cases; no live call is made by the default command.

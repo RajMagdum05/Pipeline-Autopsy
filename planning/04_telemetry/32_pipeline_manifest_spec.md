@@ -17,7 +17,7 @@ version: 2.0.0
 pack: insurance                       # optional: loads pipeline-autopsy/packs/insurance (extra validators, playbooks)
 evidence:
   level: E2                           # E0 spans only | E1 + checks | E2 + allow-listed artifact content
-  kinds_allowed: [page_text, document_facts, decision]   # only these may be uploaded (page_text as a redacted excerpt, see 33)
+  kinds_allowed: [page_text, document_facts, decision, claim_result]   # insurance example; page_text is an excerpt and claim_result is minimized, see 33
   retention_days: 14
 external_inputs: [source_document, claim_form]   # kinds no stage produces
 items:

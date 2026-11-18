@@ -102,6 +102,60 @@ def _stored_decision(record: AdjudicationResult) -> Decision:
     )
 
 
+def _record_decision_and_final_result(decision: Decision, claim_result, *, rules_input_complete=True):
+    """Emit the decision boundary and the independently checkable final artifact."""
+    decision_payload = decision.model_dump(mode="json")
+    decision_upload = {
+        "decision": decision.decision,
+        "rules_version": decision.rules_version,
+        "rules": [
+            {key: rule[key] for key in ("rule_id", "result", "consequence", "reason_code")
+             if rule.get(key) is not None}
+            for rule in decision_payload.get("rules", [])
+        ],
+    }
+    with autopsy.stage("adjudication") as adjudication_stage:
+        decision_id = adjudication_stage.record_artifact(
+            "decision", decision_payload,
+            upload_content=decision_upload, upload_redaction="fields",
+        )
+        adjudication_stage.set_attribute("pipeline.stage.version", decision.rules_version)
+        adjudication_stage.check(
+            "rules.input_complete", kind="schema",
+            result="pass" if rules_input_complete else "fail",
+            action="continued" if rules_input_complete else "blocked",
+            observed="accepted_policy_and_proof" if rules_input_complete else "missing_policy_or_proof",
+            expected="accepted_policy_and_proof",
+        )
+        for rule in decision_payload.get("rules", []):
+            adjudication_stage.check(
+                rule["rule_id"], kind="decision_rule",
+                result={"pass": "pass", "fail": "fail", "not_evaluable": "skip"}[rule["result"]],
+                action="continued",
+                field=next((ref.get("field") for ref in rule.get("inputs", []) if ref.get("field")), None),
+                observed=rule["reason_code"] or rule["result"], expected="pass",
+            )
+
+    result_payload = claim_result.model_dump(mode="json")
+    result_upload = {
+        key: result_payload.get(key)
+        for key in ("decision", "payable_amount", "message_code")
+    }
+    matches = result_payload.get("decision") == decision_payload.get("decision")
+    with autopsy.stage("final_result", inputs=[decision_id]) as final_stage:
+        result_id = final_stage.record_artifact(
+            "claim_result", result_payload,
+            upload_content=result_upload, upload_redaction="fields",
+        )
+        final_stage.check(
+            "final.matches_decision", kind="rule",
+            result="pass" if matches else "fail", action="continued",
+            target=result_id, field="decision",
+            observed=result_payload.get("decision"), expected=decision_payload.get("decision"),
+        )
+    return decision_id, result_id
+
+
 class ClaimRunService:
     def __init__(self, document_service=claim_document_processing_service):
         self.document_service = document_service
@@ -174,12 +228,20 @@ class ClaimRunService:
                 raise AdjudicationReplayConflict("The run already has a decision for different inputs; use a new config_version.")
             decision = _stored_decision(stored)
             final_decision = faults.after_adjudication(decision)
-            apply_final_result(db, claim, final_decision, run_id=processing.run_id)
+            claim_result = apply_final_result(db, claim, final_decision, run_id=processing.run_id)
+            _record_decision_and_final_result(decision, claim_result)
             return self._response(processing, processing.status, decision=final_decision)
 
         try:
             decision = adjudicate_claim(claim_form, policy, proofs)
         except AdjudicationInputMissing as exc:
+            with autopsy.stage("adjudication") as stage:
+                stage.check(
+                    # Missing accepted inputs usually reflect an upstream gate.
+                    # Keep this as a warning so the missing producer remains the origin.
+                    "rules.input_complete", kind="schema", result="warn", action="review",
+                    observed=exc.missing_kind, expected="accepted_policy_and_proof",
+                )
             return self._response(processing, "BLOCKED", error=str(exc))
 
         record = AdjudicationResult(
@@ -197,7 +259,8 @@ class ClaimRunService:
                 raise AdjudicationReplayConflict("The run already has a decision for different inputs; use a new config_version.")
             decision = _stored_decision(stored)
         final_decision = faults.after_adjudication(decision)
-        apply_final_result(db, claim, final_decision, run_id=processing.run_id)
+        claim_result = apply_final_result(db, claim, final_decision, run_id=processing.run_id)
+        _record_decision_and_final_result(decision, claim_result)
         return self._response(processing, processing.status, decision=final_decision)
 
     @staticmethod

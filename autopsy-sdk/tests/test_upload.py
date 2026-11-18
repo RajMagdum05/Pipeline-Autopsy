@@ -33,6 +33,7 @@ def _server():
 
 
 def test_page_text_upload_is_excerpted_masked_and_keeps_original_id(monkeypatch):
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_LEVEL", "E2")
     monkeypatch.setenv("AUTOPSY_EVIDENCE_KINDS", "page_text,decision")
     server, thread = _server()
     uploader = EvidenceUploader(f"http://127.0.0.1:{server.server_port}", "local-test-key")
@@ -63,6 +64,7 @@ def test_page_text_upload_is_excerpted_masked_and_keeps_original_id(monkeypatch)
 
 
 def test_kind_allowlist_is_intersection_and_queue_is_bounded(monkeypatch):
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_LEVEL", "E2")
     monkeypatch.setenv("AUTOPSY_EVIDENCE_KINDS", "page_text,decision")
     uploader = EvidenceUploader("http://127.0.0.1:1", evidence_kinds={"decision", "other"}, queue_size=1)
     entered = threading.Event()
@@ -86,6 +88,7 @@ def test_kind_allowlist_is_intersection_and_queue_is_bounded(monkeypatch):
 
 
 def test_upload_retries_server_responses_then_succeeds(monkeypatch):
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_LEVEL", "E2")
     monkeypatch.setenv("AUTOPSY_EVIDENCE_KINDS", "decision")
     server, thread = _server()
     _CaptureHandler.status_codes = [503, 503, 503, 201]
@@ -106,6 +109,7 @@ def test_upload_retries_server_responses_then_succeeds(monkeypatch):
 def test_upload_exhaustion_drops_once_and_logs_one_warning(monkeypatch, caplog):
     import logging
 
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_LEVEL", "E2")
     monkeypatch.setenv("AUTOPSY_EVIDENCE_KINDS", "decision")
     server, thread = _server()
     _CaptureHandler.status_codes = [503, 503, 503, 503]
@@ -124,3 +128,21 @@ def test_upload_exhaustion_drops_once_and_logs_one_warning(monkeypatch, caplog):
         server.shutdown()
         thread.join(timeout=2)
         server.server_close()
+
+
+def test_upload_is_disabled_unless_evidence_level_is_e2(monkeypatch):
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_KINDS", "decision")
+    monkeypatch.delenv("AUTOPSY_EVIDENCE_LEVEL", raising=False)
+    uploader = EvidenceUploader("http://127.0.0.1:1")
+    try:
+        assert uploader.enabled is False
+        assert uploader.enqueue("decision", {"decision": "APPROVED"}, {"id": "e1-id"}) is False
+    finally:
+        uploader.shutdown()
+
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_LEVEL", "E1")
+    uploader = EvidenceUploader("http://127.0.0.1:1")
+    try:
+        assert uploader.enqueue("decision", {"decision": "APPROVED"}, {"id": "e1-id"}) is False
+    finally:
+        uploader.shutdown()
