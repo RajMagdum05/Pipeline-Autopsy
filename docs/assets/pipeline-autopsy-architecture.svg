@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">Pipeline Autopsy architecture</title>
+  <desc id="desc">Insurance Pipeline emits standard traces through the independent Autopsy SDK. Pipeline Autopsy receives traces and optional redacted E2 evidence, reconstructs lineage, diagnoses root causes, and serves guarded explanations to an investigation UI.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07111f"/><stop offset="0.55" stop-color="#0b1427"/><stop offset="1" stop-color="#11142b"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a78bfa"/><stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#fb923c"/>
+    </linearGradient>
+    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M30 0H0V30" fill="none" stroke="#7184a8" stroke-opacity=".09" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="4" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="12" stdDeviation="15" flood-color="#020617" flood-opacity=".48"/>
+    </filter>
+    <marker id="arrowCyan" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#fbbf24"/>
+    </marker>
+    <style>
+      text{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#e7eefb}
+      .muted{fill:#98a9c4}.tiny{font-size:12px;letter-spacing:1.4px}.small{font-size:14px}.body{font-size:16px}.label{font-size:17px;font-weight:650}.heading{font-size:20px;font-weight:750}.card{fill:#0f1b30;stroke:#263852;stroke-width:1.4}.inner{fill:#13233b;stroke:#2b405f;stroke-width:1.2}.chip{fill:#142842;stroke:#2d4969;stroke-width:1}.line{fill:none;stroke:#38bdf8;stroke-width:2.3;stroke-opacity:.6}.evidence{fill:none;stroke:#fbbf24;stroke-width:2.1;stroke-dasharray:7 7;stroke-opacity:.64}.pulse{animation:pulse 2.8s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pulse.delay1{animation-delay:.7s}.pulse.delay2{animation-delay:1.4s}.flow{filter:url(#glow)}
+      @keyframes pulse{0%,100%{opacity:.45;transform:scale(.94)}50%{opacity:1;transform:scale(1.08)}}
+      @media(prefers-reduced-motion:reduce){.pulse{animation:none;opacity:.85}}
+    </style>
+  </defs>
+
+  <rect width="1440" height="900" rx="28" fill="url(#bg)"/>
+  <rect width="1440" height="900" rx="28" fill="url(#grid)"/>
+  <circle cx="95" cy="80" r="210" fill="#0e7490" opacity=".08"/>
+  <circle cx="1320" cy="740" r="260" fill="#6d28d9" opacity=".09"/>
+
+  <!-- Header -->
+  <text x="62" y="59" class="tiny" fill="#5eead4">OBSERVABILITY → FORENSICS</text>
+  <text x="62" y="108" font-size="34" font-weight="800">From execution to explanation</text>
+  <text x="63" y="139" class="body muted">A producer-neutral trace contract. A deterministic diagnosis core. Evidence that stays bounded.</text>
+  <g transform="translate(1185 63)">
+    <rect width="195" height="36" rx="18" fill="#101f34" stroke="#2b405f"/>
+    <circle cx="19" cy="18" r="5" fill="#2dd4bf" class="pulse"/>
+    <text x="34" y="23" class="small" fill="#b9c9df">CURRENT ARCHITECTURE</text>
+  </g>
+
+  <!-- Main system cards -->
+  <g filter="url(#shadow)">
+    <rect x="50" y="183" width="380" height="564" rx="22" class="card"/>
+    <rect x="515" y="183" width="300" height="564" rx="22" class="card"/>
+    <rect x="900" y="183" width="490" height="564" rx="22" class="card"/>
+  </g>
+
+  <!-- Producer -->
+  <g>
+    <rect x="50" y="183" width="380" height="7" rx="4" fill="url(#cyan)"/>
+    <text x="78" y="224" class="tiny" fill="#5eead4">01 · PRODUCER</text>
+    <text x="78" y="255" class="heading">Insurance Pipeline</text>
+    <text x="78" y="280" class="small muted">Business data and decisions stay here.</text>
+    <g>
+      <rect x="78" y="309" width="324" height="49" rx="12" class="inner"/>
+      <circle cx="101" cy="333" r="7" fill="#2dd4bf" class="pulse"/>
+      <text x="121" y="339" class="label">Intake · documents · OCR</text>
+      <rect x="78" y="370" width="324" height="49" rx="12" class="inner"/>
+      <circle cx="101" cy="394" r="7" fill="#2dd4bf" class="pulse delay1"/>
+      <text x="121" y="400" class="label">Classification · extraction</text>
+      <rect x="78" y="431" width="324" height="49" rx="12" class="inner"/>
+      <circle cx="101" cy="455" r="7" fill="#2dd4bf" class="pulse delay2"/>
+      <text x="121" y="461" class="label">Validation · quality gates</text>
+      <rect x="78" y="492" width="324" height="49" rx="12" class="inner"/>
+      <circle cx="101" cy="516" r="7" fill="#a78bfa" class="pulse"/>
+      <text x="121" y="522" class="label">Deterministic adjudication</text>
+      <rect x="78" y="553" width="324" height="49" rx="12" class="inner"/>
+      <circle cx="101" cy="577" r="7" fill="#a78bfa" class="pulse delay1"/>
+      <text x="121" y="583" class="label">Final result · decision check</text>
+    </g>
+    <rect x="78" y="627" width="324" height="83" rx="14" fill="#0b1728" stroke="#27435b"/>
+    <text x="98" y="656" class="tiny" fill="#5eead4">APPLICATION-OWNED</text>
+    <text x="98" y="682" class="small muted">Claims DB · source files · business rules</text>
+    <text x="98" y="701" class="small muted">Never queried by Autopsy</text>
+  </g>
+
+  <!-- SDK / contract -->
+  <g>
+    <rect x="515" y="183" width="300" height="7" rx="4" fill="url(#violet)"/>
+    <text x="543" y="224" class="tiny" fill="#c4b5fd">02 · INTEROPERABILITY</text>
+    <text x="543" y="255" class="heading">One shared contract</text>
+    <rect x="543" y="294" width="244" height="120" rx="16" class="inner"/>
+    <text x="565" y="326" class="tiny" fill="#c4b5fd">SEMANTIC SDK</text>
+    <text x="565" y="355" class="label">run · stage · operation</text>
+    <text x="565" y="381" class="small muted">artifact IDs · checks</text>
+    <rect x="543" y="439" width="244" height="105" rx="16" class="inner"/>
+    <text x="565" y="471" class="tiny" fill="#93c5fd">STANDARD TELEMETRY</text>
+    <text x="565" y="500" class="label">OpenTelemetry · OTLP</text>
+    <text x="565" y="525" class="small muted">direct or via collector</text>
+    <rect x="543" y="570" width="244" height="112" rx="16" fill="#251f1b" stroke="#76572a"/>
+    <text x="565" y="602" class="tiny" fill="#fcd34d">OPTIONAL · E2 ONLY</text>
+    <text x="565" y="631" class="label">Minimized evidence</text>
+    <text x="565" y="656" class="small muted">manifest allow-list + redaction</text>
+    <text x="543" y="716" class="small muted">No direct producer ↔ Autopsy imports</text>
+  </g>
+
+  <!-- Autopsy -->
+  <g>
+    <rect x="900" y="183" width="490" height="7" rx="4" fill="url(#violet)"/>
+    <text x="928" y="224" class="tiny" fill="#c4b5fd">03 · INDEPENDENT DIAGNOSTIC ENGINE</text>
+    <text x="928" y="255" class="heading">Pipeline Autopsy</text>
+    <rect x="928" y="291" width="434" height="66" rx="14" class="inner"/>
+    <circle cx="954" cy="324" r="7" fill="#38bdf8" class="pulse"/>
+    <text x="976" y="320" class="label">OTLP + artifact APIs</text>
+    <text x="976" y="342" class="small muted">authenticate · validate · persist</text>
+    <path d="M1145 357V380" class="line" marker-end="url(#arrowCyan)"/>
+    <rect x="928" y="385" width="434" height="91" rx="14" class="inner"/>
+    <text x="954" y="415" class="tiny" fill="#93c5fd">TRACE + EVIDENCE STORAGE</text>
+    <text x="954" y="444" class="label">PostgreSQL metadata · blob store</text>
+    <text x="954" y="465" class="small muted">Run settles → background diagnosis</text>
+    <path d="M1145 476V499" class="line" marker-end="url(#arrowCyan)"/>
+    <rect x="928" y="504" width="434" height="91" rx="14" fill="#101d36" stroke="#51418d" stroke-width="1.4"/>
+    <text x="954" y="534" class="tiny" fill="#c4b5fd">PURE, DETERMINISTIC CORE</text>
+    <text x="954" y="563" class="label">Normalize → lineage → detect → trace back</text>
+    <text x="954" y="584" class="small muted">Verdict · origin · confidence · evidence</text>
+    <path d="M1145 595V618" class="line" marker-end="url(#arrowCyan)"/>
+    <rect x="928" y="623" width="210" height="86" rx="14" class="inner"/>
+    <text x="950" y="653" class="tiny" fill="#c4b5fd">EXPLANATION</text>
+    <text x="950" y="680" class="label">Template first</text>
+    <text x="950" y="700" class="small muted">guarded optional LLM</text>
+    <rect x="1152" y="623" width="210" height="86" rx="14" class="inner"/>
+    <text x="1174" y="653" class="tiny" fill="#5eead4">ENGINEER UI</text>
+    <text x="1174" y="680" class="label">Inspect · feedback</text>
+    <text x="1174" y="700" class="small muted">runs · graph · evidence</text>
+  </g>
+
+  <!-- Trace flow -->
+  <path id="traceA" d="M430 403 C462 403 479 403 515 403" class="line" marker-end="url(#arrowCyan)"/>
+  <path id="traceB" d="M815 466 C850 466 865 324 928 324" class="line" marker-end="url(#arrowCyan)"/>
+  <circle r="5" fill="#a5f3fc" class="flow"><animateMotion dur="2.2s" repeatCount="indefinite"><mpath xlink:href="#traceA"/></animateMotion></circle>
+  <circle r="5" fill="#a5f3fc" class="flow"><animateMotion dur="2.9s" begin=".45s" repeatCount="indefinite"><mpath xlink:href="#traceB"/></animateMotion></circle>
+  <g transform="translate(444 352)">
+    <rect width="62" height="27" rx="13" fill="#102b38" stroke="#1e6371"/>
+    <text x="14" y="18" font-size="11" letter-spacing=".7" fill="#99f6e4">OTLP</text>
+  </g>
+
+  <!-- Optional evidence flow, separate and clearly opt-in -->
+  <path id="evidenceFlow" d="M787 626 C842 626 857 343 928 343" class="evidence" marker-end="url(#arrowAmber)"/>
+  <circle r="4.5" fill="#fde68a" class="flow"><animateMotion dur="4.5s" begin="1.2s" repeatCount="indefinite"><mpath xlink:href="#evidenceFlow"/></animateMotion></circle>
+
+  <!-- Footer legend -->
+  <g transform="translate(62 798)">
+    <path d="M0 0H56" class="line"/><circle cx="28" cy="0" r="4" fill="#a5f3fc"/>
+    <text x="70" y="5" class="small muted">OTLP spans + checks</text>
+    <path d="M260 0H316" class="evidence"/><circle cx="288" cy="0" r="4" fill="#fde68a"/>
+    <text x="330" y="5" class="small muted">Opt-in redacted artifacts at E2</text>
+    <text x="798" y="5" class="small" fill="#fcd34d">Policy RAG: future, not approved or implemented</text>
+  </g>
+  <text x="62" y="858" class="small muted">OpenTelemetry is the boundary. Business data stays with its owner. The LLM can explain a finding; it cannot decide it.</text>
+</svg>
