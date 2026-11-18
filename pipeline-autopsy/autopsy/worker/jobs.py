@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from autopsy.core.fanout import diagnose
 from autopsy.core_adapter import build_core_inputs, missing_referenced_artifacts
 from autopsy.explain.bundle import build_bundle
-from autopsy.explain.template import build_template
+from autopsy.explain.llm import client_from_env
+from autopsy.explain.service import explain
 from autopsy.knowledge.playbooks import retrieve
 from autopsy.db.models import (
     DiagnosisJobRecord, ExecutionRecord, ExplanationRecord, FindingRecord,
@@ -56,7 +57,14 @@ def schedule_diagnosis(db, execution, *, has_run_span, last_span_at, now=None):
     execution.status = "queued"
 
 
-def _persist_result(db, execution, job, result, now, *, artifacts=None, evidence_level="E1", spans=None):
+def _persist_result(db, execution, job, result, now, *, artifacts=None, evidence_level="E1", spans=None,
+                    llm_client=None):
+    bundle = build_bundle(result, artifacts or {}, evidence_level=evidence_level)
+    bundle["remediation"] = retrieve(db, bundle["findings"], spans or [])
+    # Release the write transaction (playbook sync) before the optional, slow LLM call.
+    db.commit()
+    explanation = explain(bundle, llm_client)
+
     db.query(ObservationRecord).filter_by(execution_id=execution.id).delete(synchronize_session=False)
     db.query(FindingRecord).filter_by(execution_id=execution.id).delete(synchronize_session=False)
 
@@ -99,9 +107,6 @@ def _persist_result(db, execution, job, result, now, *, artifacts=None, evidence
                                  finding.get("evidence", []), observation_index),
         ))
 
-    bundle = build_bundle(result, artifacts or {}, evidence_level=evidence_level)
-    bundle["remediation"] = retrieve(db, bundle["findings"], spans or [])
-    explanation = build_template(bundle)
     explanation_row = db.get(ExplanationRecord, execution.id)
     if explanation_row is None:
         explanation_row = ExplanationRecord(execution_id=execution.id)
@@ -110,11 +115,11 @@ def _persist_result(db, execution, job, result, now, *, artifacts=None, evidence
     explanation_row.summary = explanation["summary"]
     explanation_row.narrative = explanation["narrative"]
     explanation_row.remediation = explanation["remediation"]
-    explanation_row.guardrail_log = []
-    explanation_row.model = None
-    explanation_row.tokens_in = None
-    explanation_row.tokens_out = None
-    explanation_row.latency_ms = None
+    explanation_row.guardrail_log = explanation["guardrail_log"]
+    explanation_row.model = explanation["model"]
+    explanation_row.tokens_in = explanation["tokens_in"]
+    explanation_row.tokens_out = explanation["tokens_out"]
+    explanation_row.latency_ms = explanation["latency_ms"]
 
     execution.verdict = result.get("verdict")
     execution.trace_grade = result.get("trace_grade")
@@ -124,6 +129,16 @@ def _persist_result(db, execution, job, result, now, *, artifacts=None, evidence
     job.error = None
     job.updated_at = now
     db.commit()
+
+
+def _llm_client(factory):
+    """Build the optional explanation client; a broken LLM config never fails diagnosis."""
+    if factory is None:
+        return None
+    try:
+        return factory()
+    except Exception:
+        return None
 
 
 def _mark_unregistered(db, execution, job, now):
@@ -137,7 +152,8 @@ def _mark_unregistered(db, execution, job, now):
     db.commit()
 
 
-def process_due_jobs(session_factory, *, now=None, settle_seconds=None, incomplete_timeout_seconds=None):
+def process_due_jobs(session_factory, *, now=None, settle_seconds=None, incomplete_timeout_seconds=None,
+                     llm_client_factory=client_from_env):
     """Run due diagnosis jobs; return the number claimed for processing."""
     import os
     from datetime import timedelta
@@ -185,6 +201,7 @@ def process_due_jobs(session_factory, *, now=None, settle_seconds=None, incomple
                     db, execution, job, result, now,
                     artifacts=artifacts, evidence_level=pipeline.evidence_level or "E1",
                     spans=spans,
+                    llm_client=_llm_client(llm_client_factory),
                 )
             except Exception:
                 db.rollback()

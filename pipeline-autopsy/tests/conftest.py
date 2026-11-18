@@ -10,3 +10,6 @@ if str(repo_root) not in sys.path:
 TEST_API_KEY = "autopsy-test-static-key"
 os.environ["AUTOPSY_API_KEY"] = TEST_API_KEY
 os.environ.setdefault("AUTOPSY_DATABASE_URL", "sqlite:///./test.db")
+# Automated tests never reach a real LLM: an empty model disables the Gemini client
+# (set before .env is loaded, which never overrides existing variables).
+os.environ["AUTOPSY_LLM_MODEL"] = ""

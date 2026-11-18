@@ -29,9 +29,14 @@ class CaptureHandler(BaseHTTPRequestHandler):
 
 def test_evidence_controls_default_to_e1_and_intersect_manifest(monkeypatch):
     monkeypatch.delenv("AUTOPSY_EVIDENCE_LEVEL", raising=False)
-    monkeypatch.setenv("AUTOPSY_EVIDENCE_KINDS", "page_text,document_facts,claim_form")
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_KINDS", "page_text,document_facts,claim_form,claim_result")
     assert evidence_level() == "E1"
-    assert evidence_kinds() == {"page_text", "document_facts"}
+    assert evidence_kinds() == {"page_text", "document_facts", "claim_result"}
+
+
+def test_claim_result_is_allowed_only_when_requested(monkeypatch):
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_KINDS", "claim_result,decision,other")
+    assert evidence_kinds() == {"claim_result", "decision"}
 
 
 def test_page_excerpt_selects_value_lines_and_masks_identifiers():
@@ -119,3 +124,55 @@ def test_e2_fake_server_uploads_only_allowed_redacted_artifacts(monkeypatch):
     assert extracted["content"]["facts"][0]["raw_value"] == "125.00"
     assert extracted["redacted"] is True and extracted["redaction"] == "fields"
     assert all(payload["kind"] != "claim_form" for payload in payloads)
+
+
+def test_e2_decision_and_claim_result_upload_only_minimized_fields(monkeypatch):
+    from app.adjudication.schemas import Decision, InputReference, RuleResult
+    from app.final_result.service import build_final_result
+    from app.orchestrator.service import _record_decision_and_final_result
+
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_LEVEL", "E2")
+    monkeypatch.setenv("AUTOPSY_EVIDENCE_KINDS", "decision,claim_result")
+    CaptureHandler.requests = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CaptureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    uploader = EvidenceUploader(f"http://127.0.0.1:{server.server_port}", evidence_kinds=evidence_kinds())
+    _set_artifact_uploader(uploader)
+    decision = Decision(
+        decision="REJECTED", rules_version="adjudication-rules-v1",
+        rules=(RuleResult(
+            rule_id="rule.service_in_coverage", result="fail", consequence="REJECT",
+            reason_code="SERVICE_BEFORE_COVERAGE",
+            inputs=(InputReference(document_id="private-document-id", field="admission_date"),),
+        ),),
+    )
+    claim_result = build_final_result(decision, claim_id="private-claim-id", run_id="private-run-id")
+    try:
+        with run(run_id="evidence-run"):
+            _record_decision_and_final_result(decision, claim_result)
+        assert uploader.flush(3)
+    finally:
+        _set_artifact_uploader(None)
+        uploader.shutdown()
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+    payloads = {payload["kind"]: payload for payload in CaptureHandler.requests}
+    assert set(payloads) == {"decision", "claim_result"}
+    assert payloads["decision"]["content"] == {
+        "decision": "REJECTED",
+        "rules_version": "adjudication-rules-v1",
+        "rules": [{
+            "rule_id": "rule.service_in_coverage", "result": "fail",
+            "consequence": "REJECT", "reason_code": "SERVICE_BEFORE_COVERAGE",
+        }],
+    }
+    assert payloads["claim_result"]["content"] == {
+        "decision": "REJECTED", "payable_amount": None, "message_code": "CLAIM_REJECTED",
+    }
+    for payload in payloads.values():
+        assert payload["redacted"] is True and payload["redaction"] == "fields"
+        assert "private-claim-id" not in json.dumps(payload["content"])
+        assert "private-document-id" not in json.dumps(payload["content"])

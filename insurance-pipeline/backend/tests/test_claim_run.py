@@ -176,10 +176,21 @@ def test_full_claim_run_adjudicates_accepted_partial_run(tmp_path, monkeypatch):
         assert final.json()["decision"] == "APPROVED"
         assert final.json()["run_id"] == body["run_id"]
         spans = capture.spans
-        assert len(spans) == 1
-        run_span = spans[0]
+        run_span = next(span for span in spans
+                        if span.attributes.get("pipeline.span.role") == "execution")
         assert run_span.attributes["pipeline.run.id"] == body["run_id"]
         assert run_span.attributes["pipeline.run.outcome"] == "partial"
+        stages = {span.attributes.get("pipeline.stage.name"): span for span in spans
+                  if span.attributes.get("pipeline.span.role") == "stage"}
+        assert set(stages) == {"adjudication", "final_result"}
+        decision_id = stages["adjudication"].attributes["pipeline.artifact.output_ids"][0]
+        final_stage = stages["final_result"]
+        assert final_stage.attributes["pipeline.artifact.input_ids"] == (decision_id,)
+        assert len(final_stage.attributes["pipeline.artifact.output_ids"]) == 1
+        checks = {event.attributes["pipeline.check.id"]: event.attributes
+                  for span in stages.values() for event in span.events if event.name == "pipeline.check"}
+        assert checks["final.matches_decision"]["pipeline.check.result"] == "pass"
+        assert checks["rules.input_complete"]["pipeline.check.result"] == "pass"
         pii_values = ("Asha Rao", "POL-101", "100.00", "150.00")
         exported_values = [repr(value) for value in run_span.attributes.values()]
         exported_values.extend(
@@ -209,6 +220,60 @@ def test_out_of_coverage_bill_is_rejected(tmp_path, monkeypatch):
         assert final.json()["reasons"][0]["rule_id"] == "rule.service_in_coverage"
         with factory() as db:
             assert db.query(IntakeClaim).filter_by(claim_id=claim_id).one().claim_status == "REJECTED"
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def test_final_mismatch_is_emitted_as_a_check_against_the_adjudication_artifact(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAULT_INJECTION_ENABLED", "true")
+    client, factory, engine, claim_id = setup(tmp_path, monkeypatch, run_status="COMPLETED")
+    try:
+        with InMemoryCapture() as capture:
+            response = client.post(
+                f"/claims/{claim_id}/process",
+                json={"config_version": "test-config", "fault": "final_mismatch"},
+                headers={"Authorization": f"Bearer {TOKEN}"},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"]["decision"] == "REJECTED"
+        stages = {span.attributes.get("pipeline.stage.name"): span for span in capture.spans
+                  if span.attributes.get("pipeline.span.role") == "stage"}
+        adjudication = stages["adjudication"]
+        final_result = stages["final_result"]
+        decision_id = adjudication.attributes["pipeline.artifact.output_ids"][0]
+        result_id = final_result.attributes["pipeline.artifact.output_ids"][0]
+        assert final_result.attributes["pipeline.artifact.input_ids"] == (decision_id,)
+        check = next(event.attributes for event in final_result.events
+                     if event.attributes.get("pipeline.check.id") == "final.matches_decision")
+        assert check["pipeline.check.result"] == "fail"
+        assert check["pipeline.check.target_artifact_id"] == result_id
+        assert check["pipeline.check.observed"] == "REJECTED"
+        assert check["pipeline.check.expected"] == "APPROVED"
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def test_incomplete_adjudication_inputs_are_warned_and_left_to_upstream_origin(tmp_path, monkeypatch):
+    from app.adjudication.schemas import AdjudicationInputMissing
+
+    client, factory, engine, claim_id = setup(tmp_path, monkeypatch, run_status="PARTIAL")
+
+    def missing_proof(*_args, **_kwargs):
+        raise AdjudicationInputMissing("proof", "Accepted proof is missing.")
+
+    monkeypatch.setattr("app.orchestrator.service.adjudicate_claim", missing_proof)
+    try:
+        with InMemoryCapture() as capture:
+            response = post_process(client, claim_id)
+        assert response.status_code == 200, response.text
+        adjudication = next(span for span in capture.spans
+                            if span.attributes.get("pipeline.stage.name") == "adjudication")
+        check = next(event.attributes for event in adjudication.events
+                     if event.attributes.get("pipeline.check.id") == "rules.input_complete")
+        assert check["pipeline.check.result"] == "warn"
+        assert check["pipeline.check.action"] == "review"
     finally:
         app.dependency_overrides.clear()
         engine.dispose()
@@ -389,9 +454,15 @@ def test_claim_run_executes_document_pipeline_with_mocked_gemini(
         body = response.json()
         spans = capture.spans
         assert spans and any(span.attributes.get("pipeline.span.role") == "execution" for span in spans)
-        manifest = {"stages": [{"name": "document_processing", "scope": "item"}]}
+        manifest = {"stages": [
+            {"name": "document_processing", "scope": "item"},
+            {"name": "adjudication", "scope": "run"},
+            {"name": "final_result", "scope": "run"},
+        ]}
         assert assert_contract(spans, manifest) == "A"
         document_stages = [span for span in spans if span.attributes.get("pipeline.span.role") == "stage"]
+        document_stages = [span for span in document_stages
+                           if span.attributes["pipeline.stage.name"] == "document_processing"]
         assert document_stages
         assert all(span.attributes["pipeline.stage.name"] == "document_processing" for span in document_stages)
         if force_retry:

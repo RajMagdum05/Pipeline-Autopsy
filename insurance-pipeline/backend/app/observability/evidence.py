@@ -21,8 +21,8 @@ def evidence_level():
 def evidence_kinds():
     """Return the producer's local allow-list, intersected with the manifest."""
     local = {kind.strip() for kind in os.getenv(
-        "AUTOPSY_EVIDENCE_KINDS", "page_text,document_facts,decision").split(",") if kind.strip()}
-    manifest = {"page_text", "document_facts", "decision"}
+        "AUTOPSY_EVIDENCE_KINDS", "page_text,document_facts,decision,claim_result").split(",") if kind.strip()}
+    manifest = {"page_text", "document_facts", "decision", "claim_result"}
     return local & manifest
 
 

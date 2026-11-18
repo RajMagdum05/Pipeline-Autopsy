@@ -18,11 +18,13 @@ class EvidenceUploader:
         self.endpoint = endpoint.rstrip("/")
         self.api_key = api_key or os.getenv("AUTOPSY_API_KEY")
         configured = {kind.strip() for kind in os.getenv(
-            "AUTOPSY_EVIDENCE_KINDS", "page_text,document_facts,decision").split(",") if kind.strip()}
+            "AUTOPSY_EVIDENCE_KINDS", "page_text,document_facts,decision,claim_result").split(",") if kind.strip()}
         if isinstance(evidence_kinds, str):
             evidence_kinds = {kind.strip() for kind in evidence_kinds.split(",") if kind.strip()}
         explicit = configured if evidence_kinds is None else set(evidence_kinds)
         self.allowed = configured & explicit
+        level = os.getenv("AUTOPSY_EVIDENCE_LEVEL", "E1").strip().upper()
+        self.enabled = level == "E2"
         self.queue = queue.Queue(maxsize=queue_size)
         self.retry_delays = tuple(retry_delays)
         self._sleep = sleeper
@@ -33,7 +35,7 @@ class EvidenceUploader:
         self._thread.start()
 
     def enqueue(self, kind, content, metadata, excerpt_values=None, redaction=None):
-        if self._closed.is_set() or kind not in self.allowed:
+        if self._closed.is_set() or not self.enabled or kind not in self.allowed:
             return False
         try:
             self.queue.put_nowait((kind, content, dict(metadata), excerpt_values, redaction))
