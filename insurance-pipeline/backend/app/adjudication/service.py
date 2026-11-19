@@ -1,7 +1,7 @@
 """Pure deterministic v1 decision aggregation for an accepted claim run."""
 
 from decimal import Decimal
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from app.information_extraction.content_service import DEFAULT_CURRENCY_TOLERANCES
 from app.adjudication.rules import (
