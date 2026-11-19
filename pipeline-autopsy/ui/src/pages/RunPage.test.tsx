@@ -66,4 +66,20 @@ describe('RunPage', () => {
       'finding-1', 'confirmed', 'Reviewed against the source.',
     ))
   })
+  it('refreshes graph roles when the diagnosis finishes after the page loads', async () => {
+    const diagnosed = await vi.mocked(getDiagnosis)('toy_short_body')
+    const diagnosedGraph = await vi.mocked(getExecutionGraph)('toy_short_body')
+    vi.mocked(getExecutionGraph).mockReset()
+    vi.mocked(getExecutionGraph)
+      .mockResolvedValueOnce({ ...diagnosedGraph, nodes: diagnosedGraph.nodes.map((node) => ({ ...node, role: '' })) })
+      .mockResolvedValue(diagnosedGraph)
+    vi.mocked(getDiagnosis).mockReset()
+    vi.mocked(getDiagnosis).mockResolvedValueOnce({ pending: true } as never).mockResolvedValue(diagnosed)
+    const { container } = render(<MemoryRouter initialEntries={['/runs/toy_short_body']}>
+      <Routes><Route path="/runs/:executionId" element={<RunPage />} /></Routes>
+    </MemoryRouter>)
+    await waitFor(() => expect(container.querySelector('[data-role="origin"][data-stage="fetch"]')).not.toBeNull(),
+      { timeout: 4000 })
+    expect(getExecutionGraph).toHaveBeenCalledTimes(2)
+  })
 })

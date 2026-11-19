@@ -28,12 +28,12 @@ test('serves the run list and diagnosed lineage from the bundled UI', async ({ p
   }
 
   await page.addInitScript((key) => localStorage.setItem('pipeline-autopsy-api-key', key), apiKey)
-  await page.goto('/')
+  await page.goto('/ui/')
   await expect(page.getByRole('heading', { name: 'Pipeline runs' })).toBeVisible()
   await expect(page.locator('tbody tr')).toHaveCount(3, { timeout: 30_000 })
 
-  await page.goto('/runs/toy_short_body')
+  await page.goto('/ui/runs/toy_short_body')
   await expect(page.getByRole('heading', { name: /toy_short_body/ })).toBeVisible()
   await expect(page.locator('[data-role="origin"][data-stage="fetch"]')).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByText('schema.minLength')).toBeVisible()
+  await expect(page.getByText('schema.minLength', { exact: true }).first()).toBeVisible()
 })

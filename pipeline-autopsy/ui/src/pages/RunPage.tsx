@@ -86,6 +86,26 @@ export function RunPage() {
     return () => { active = false; window.clearInterval(poll) }
   }, [diagnosis, execution, executionId])
 
+  // Graph node roles (origin, tainted, ...) come from the diagnosis. If the page
+  // loaded before diagnosis finished, refresh the graph once the diagnosis is ready.
+  const diagnosisReady = isDiagnosis(diagnosis)
+  useEffect(() => {
+    if (!executionId || !diagnosisReady) return
+    const controller = new AbortController()
+    void getExecutionGraph(executionId, controller.signal).then((currentGraph) => {
+      setGraph(currentGraph)
+      setSelectedStage((current) => {
+        const origin = currentGraph.nodes.find((node) => node.role === 'origin')?.id
+        const stillPresent = current && currentGraph.nodes.some((node) => node.id === current)
+        return origin && (!stillPresent || current === currentGraph.nodes[0]?.id) ? origin : current
+      })
+    }).catch((requestError) => {
+      if (requestError instanceof DOMException && requestError.name === 'AbortError') return
+      setError(requestError instanceof Error ? requestError.message : 'Could not refresh the graph')
+    })
+    return () => controller.abort()
+  }, [diagnosisReady, executionId])
+
   const manifest = useMemo(() => pipelines.find((item) => item.pipeline === execution?.pipeline
     && item.version === execution?.version)?.manifest, [execution, pipelines])
   const stageOrder = Array.isArray(manifest?.stages)
